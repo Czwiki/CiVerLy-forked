@@ -107,12 +107,12 @@ Next, we finish the model::
     ....:     granularity=GRANULARITY.WORDWISE,
     ....:     linear_layer_modeling=LINEAR_LAYER_MODELING.GENERALIZED_WORDWISE,
     ....:     path=Path("./DOCTEST-AES-Models/"))
-    sage: aes.model(model_options) # doctest: +NORMALIZE_WHITESPACE +ELLIPSIS
+    sage: aes.model(model_options) # doctest: +NORMALIZE_WHITESPACE
     Using existing file DOCTEST-AES-Models/MixColumn51845.sol,
     make sure it is up to date!
-    ...
+    3200 variables and 3329 constraints were written to
     'DOCTEST-AES-Models/AES.mps'
-    Boolean Program (minimization, ...)
+    Boolean Program (minimization, 3200 variables, 3329 constraints)
 
 Now, you would again copy the ``.mps`` file, this time of course the
 ``AES.mps``, to a machine with a supported solver. After solving, the
