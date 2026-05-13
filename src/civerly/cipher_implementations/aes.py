@@ -23,7 +23,7 @@ given in :class:`civerly.model_options.MODEL_OPTIONS`::
     ....:       milp_solver=SCIP_CVL(),
     ....:       path=Path(tmpdir))
     ....:   aes.analyse(model_options)
-    2884 variables and 3085 constraints were written to '...'
+    3236 variables and 3437 constraints were written to '...'
     55
 
 Indeed, there are 55 active S-boxes for 10-round AES. Next up, we want to
@@ -43,7 +43,7 @@ requires solving a MILP itself::
     ....:       milp_solver=SCIP_CVL(),
     ....:       path=Path(tmpdir))
     ....:   aes.analyse(model_options)
-    2848 variables and 2977 constraints were written to '...'
+    3200 variables and 3329 constraints were written to '...'
     55
 
 Notice that above we use the ``analyse`` function of the ``aes`` cipher.
@@ -409,7 +409,7 @@ class AES_CVL:
                 ....:       milp_solver=GLPK_CVL(),
                 ....:       path=Path(tmpdir))
                 ....:   aes.analyse(model_options)
-                548 variables and 557 constraints were written to '...'
+                644 variables and 653 constraints were written to '...'
                 5
                 sage: from civerly.cipher_implementations.aes import AES_CVL
                 sage: from civerly.model_options import *
@@ -424,7 +424,7 @@ class AES_CVL:
                 ....:       milp_solver=GLPK_CVL(),
                 ....:       path=Path(tmpdir))
                 ....:   aes.analyse(model_options)
-                544 variables and 545 constraints were written to '...'
+                640 variables and 641 constraints were written to '...'
                 5
                 sage: from civerly.cipher_implementations.aes import AES_CVL
                 sage: from civerly.model_options import *
@@ -439,7 +439,7 @@ class AES_CVL:
                 ....:       milp_solver=GUROBI_CVL(),
                 ....:       path=Path(tmpdir))
                 ....:   aes.analyse(model_options)
-                2884 variables and 3085 constraints were written to '...'
+                3236 variables and 3437 constraints were written to '...'
                 55
                 sage: from civerly.cipher_implementations.aes import AES_CVL
                 sage: from civerly.model_options import *
@@ -454,7 +454,7 @@ class AES_CVL:
                 ....:       milp_solver=GUROBI_CVL(),
                 ....:       path=Path(tmpdir))
                 ....:   aes.analyse(model_options)
-                2848 variables and 2977 constraints were written to '...'
+                3200 variables and 3329 constraints were written to '...'
                 55
 
             Trying the parallel construction
@@ -486,7 +486,7 @@ class AES_CVL:
                 ....:   cipher.generate_report(model_options)
                 ....:   trail = str(cipher.get_trail(model_options))
                 ....:   assert "Unnamed Component" not in trail
-                5888 variables and 6145 constraints were written to '...'
+                6592 variables and 6849 constraints were written to '...'
                 55
                 Output file in: ...
 
