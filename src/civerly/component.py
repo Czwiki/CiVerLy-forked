@@ -27,18 +27,18 @@ from sage.sat.solvers.dimacs import DIMACS
 from sage.numerical.mip import MixedIntegerLinearProgram
 from sage.geometry.polyhedron.constructor import Polyhedron
 
-from civerly.util import vec_to_int, int_to_vec
 from civerly.util import list_of_predecessor_vector_indices
 from civerly.util import hw, hw_tau, suppress_output
+from civerly.util import reduction_algorithm_ST17
+from civerly.util import vec_to_int, int_to_vec
 from civerly.util import _write_espresso_input
 from civerly.util import _read_espresso_output
-from civerly.util import reduction_algorithm_ST17
 from civerly.util import translate_sat_clause
-from civerly.model_options import CRYPTANALYSIS, OPTIMIZATION
 from civerly.model_options import GRANULARITY, LINEAR_LAYER_MODELING
-from civerly.model_options import SBOX_MODELING
+from civerly.model_options import CRYPTANALYSIS, OPTIMIZATION
 from civerly.model_options import InvalidModelOptionException
-from civerly.largesboxes import largesboxes
+from civerly.model_options import SBOX_MODELING
+from civerly.distorted_balls import distorted_balls
 from civerly.solvers import ESPRESSO_CVL, NO_MILP_SOLVER_CVL, NO_LOGIC_MINIMIZER_CVL
 
 
@@ -53,7 +53,7 @@ class Component(ABC):
     EXAMPLES::
 
         sage: from civerly.component import Component
-        sage: comp = Component(16, 16)  # doctest: +ELLIPSIS
+        sage: comp = Component(16, 16)
         Traceback (most recent call last):
         ...
         TypeError: Can't instantiate abstract class Component...
@@ -100,6 +100,7 @@ class Component(ABC):
         self.__input_length = input_length
         self.__output_length = output_length
         self._return_immediately_ = False
+        self.results = []
 
     def __call__(self, x):
         r"""Evaluate this component."""
@@ -288,6 +289,17 @@ class I_CVL(Component):
             return self.name
         return f"Identity({self.input_length})"
 
+    def _to_dict(self):
+        return {
+            "type": "I_CVL",
+            "name": self.name,
+            "input_length": int(self.input_length),
+        }
+
+    @classmethod
+    def _from_dict(cls, d):
+        return cls(d["input_length"], name=d.get("name"))
+
     def _model_milp(self, model_options):
         r"""
         Model this component in MILP.
@@ -366,6 +378,18 @@ class C_CVL(Component):
         if self.name is not None:
             return self.name
         return f"Constant({self.output_length})"
+
+    def _to_dict(self):
+        return {
+            "type": "C_CVL",
+            "name": self.name,
+            "output_length": int(self.output_length),
+            "const": int(self.const),
+        }
+
+    @classmethod
+    def _from_dict(cls, d):
+        return cls(d["output_length"], d["const"], name=d.get("name"))
 
     def _model_milp(self, model_options):
         self._init_model(model_options)
@@ -449,6 +473,18 @@ class RK_CVL(C_CVL):
             return self.name
         return f"Roundkey({self.output_length})"
 
+    def _to_dict(self):
+        return {
+            "type": "RK_CVL",
+            "name": self.name,
+            "output_length": int(self.output_length),
+            "const": int(self.const),
+        }
+
+    @classmethod
+    def _from_dict(cls, d):
+        return cls(d["output_length"], d["const"], name=d.get("name"))
+
 
 class ConstXOR_CVL(Component):
     r"""
@@ -474,7 +510,7 @@ class ConstXOR_CVL(Component):
         sage: constxor = ConstXOR_CVL(32, 0x11112222)
         sage: hex(vec_to_int(constxor(int_to_vec(0xababcdcd,32))))
         '0xbabaefef'
-        sage: constxor.const = 0x1019b214  # doctest: +ELLIPSIS
+        sage: constxor.const = 0x1019b214
         Traceback (most recent call last):
         ...
         AttributeError: ...
@@ -516,6 +552,18 @@ class ConstXOR_CVL(Component):
         if self.name is not None:
             return self.name
         return f"ConstantXOR({self.output_length})"
+
+    def _to_dict(self):
+        return {
+            "type": "ConstXOR_CVL",
+            "name": self.name,
+            "output_length": int(self.output_length),
+            "const": int(self.const),
+        }
+
+    @classmethod
+    def _from_dict(cls, d):
+        return cls(d["output_length"], d["const"], name=d.get("name"))
 
     def _model_milp(self, model_options):
         self._init_model(model_options)
@@ -600,6 +648,18 @@ class RoundkeyXOR_CVL(ConstXOR_CVL):
             return self.name
         return f"RoundkeyXOR({self.output_length})"
 
+    def _to_dict(self):
+        return {
+            "type": "RoundkeyXOR_CVL",
+            "name": self.name,
+            "output_length": int(self.output_length),
+            "const": int(self.const),
+        }
+
+    @classmethod
+    def _from_dict(cls, d):
+        return cls(d["output_length"], d["const"], name=d.get("name"))
+
 
 class XOR_CVL(Component):
     r"""
@@ -644,6 +704,17 @@ class XOR_CVL(Component):
         if self.name is not None:
             return self.name
         return f"XOR({(self.word_length)})"
+
+    def _to_dict(self):
+        return {
+            "type": "XOR_CVL",
+            "name": self.name,
+            "word_length": int(self.word_length),
+        }
+
+    @classmethod
+    def _from_dict(cls, d):
+        return cls(d["word_length"], name=d.get("name"))
 
     def _model_milp(self, model_options):
         """
@@ -806,6 +877,17 @@ class ModAdd_CVL(Component):
         if self.name is not None:
             return self.name
         return f"ModAdd({self.word_length})"
+
+    def _to_dict(self):
+        return {
+            "type": "ModAdd_CVL",
+            "name": self.name,
+            "word_length": int(self.word_length),
+        }
+
+    @classmethod
+    def _from_dict(cls, d):
+        return cls(d["word_length"], name=d.get("name"))
 
     def _model_milp(self, model_options):
         raise InvalidModelOptionException(
@@ -970,6 +1052,17 @@ class AND_CVL(Component):
         if self.name is not None:
             return self.name
         return f"And({self.word_length})"
+
+    def _to_dict(self):
+        return {
+            "type": "AND_CVL",
+            "name": self.name,
+            "word_length": int(self.word_length),
+        }
+
+    @classmethod
+    def _from_dict(cls, d):
+        return cls(d["word_length"], name=d.get("name"))
 
     @property
     def word_length(self):
@@ -1176,6 +1269,33 @@ class LinearLayer_CVL(Component):
         if self.name is not None:
             return self.name
         return f"LL({self.input_length} -> {self.output_length})"
+
+    def _to_dict(self):
+        def _int_or_none(x):
+            return int(x) if x is not None else None
+        return {
+            "type": "LinearLayer_CVL",
+            "name": self.name,
+            "binary_matrix": [
+                [int(x) for x in row]
+                for row in self.binary_matrix.rows()
+            ],
+            "branch_number_differential": _int_or_none(
+                self.branch_number_differential
+            ),
+            "branch_number_linear": _int_or_none(self.branch_number_linear),
+        }
+
+    @classmethod
+    def _from_dict(cls, d):
+        from sage.matrix.constructor import Matrix as matrix
+        mat = matrix(GF(2), d["binary_matrix"])
+        return cls(
+            mat,
+            branch_number_differential=d["branch_number_differential"],
+            branch_number_linear=d["branch_number_linear"],
+            name=d.get("name"),
+        )
 
     def inv(self):
         r"""Create the inverse of the current instance."""
@@ -1476,7 +1596,7 @@ class LinearLayer_CVL(Component):
             sage: from civerly.component import LinearLayer_CVL
             sage: from civerly.model_options import *
             sage: import tempfile
-            sage: with tempfile.TemporaryDirectory() as tmpdir:  # optional - cryptominisat  # doctest: +ELLIPSIS +NORMALIZE_WHITESPACE
+            sage: with tempfile.TemporaryDirectory() as tmpdir:  # optional - cryptominisat
             ....:   arr = [
             ....:     [1, 0, 0, 0],
             ....:     [0, 1, 0, 0],
@@ -1524,8 +1644,7 @@ class LinearLayer_CVL(Component):
             ....:     Path(tmpdir) / 'LL-doctest.sat',
             ....:     model_options)
             ....:   _ = cipher.get_trail(model_options)  # assigned to suppress repr
-            48 variables and 89 clauses were written to
-            '...'
+            48 variables and 89 clauses were written to '...'
             [  0 ,100] (trying w =  50) : SAT
             [  0 , 50] (trying w =  25) : SAT
             [  0 , 25] (trying w =  12) : SAT
@@ -1535,8 +1654,7 @@ class LinearLayer_CVL(Component):
             [  0 , 1] (trying w =   0) : SAT
             0
             Output file in: ...
-            48 variables and 110 clauses were written to
-            '...'
+            48 variables and 110 clauses were written to '...'
             [  0 ,100] (trying w =  50) : SAT
             [  0 , 50] (trying w =  25) : SAT
             [  0 , 25] (trying w =  12) : SAT
@@ -1695,6 +1813,18 @@ class PermuteLayer_CVL(LinearLayer_CVL):
         if self.name is not None:
             return self.name
         return f"PL({self.input_length})"
+
+    def _to_dict(self):
+        return {
+            "type": "PermuteLayer_CVL",
+            "name": self.name,
+            "perm": [int(x) for x in self.perm],
+            "word_coarseness": int(self.word_coarseness),
+        }
+
+    @classmethod
+    def _from_dict(cls, d):
+        return cls(d["perm"], word_coarseness=d["word_coarseness"], name=d.get("name"))
 
     def inv(self):
         r"""
@@ -1856,6 +1986,23 @@ class RotateLayer_CVL(PermuteLayer_CVL):
             return self.name
         return f"RL({self.input_length})"
 
+    def _to_dict(self):
+        return {
+            "type": "RotateLayer_CVL",
+            "name": self.name,
+            "input_length": int(self.input_length),
+            "r": int(self.r),
+            "word_coarseness": int(self.word_coarseness),
+        }
+
+    @classmethod
+    def _from_dict(cls, d):
+        return cls(
+            d["input_length"], d["r"],
+            word_coarseness=d["word_coarseness"],
+            name=d.get("name"),
+        )
+
     def inv(self):
         r"""
         Creates an inverse instance of ``self``.
@@ -1921,6 +2068,17 @@ class SBox_CVL(Component):
         if self.name is not None:
             return self.name
         return f"SBox({self.S.input_size()} -> {self.S.output_size()})"
+
+    def _to_dict(self):
+        return {
+            "type": "SBox_CVL",
+            "name": self.name,
+            "S": [int(x) for x in self.S],
+        }
+
+    @classmethod
+    def _from_dict(cls, d):
+        return cls(SBox(d["S"]), name=d.get("name"))
 
     def _model_milp(self, model_options):
         self._init_model(model_options)
@@ -2109,7 +2267,7 @@ class SBox_CVL(Component):
                         continue
                     # prob needs to be a string to comply with json format
                     inequations_for_prob[str(prob)] = \
-                        largesboxes.get_inequations(ddt, prob)
+                        distorted_balls.get_inequations(ddt, prob)
                 # Cache inequations
                 with open(s_file_ineq, "w") as ineq_file:
                     json.dump(inequations_for_prob, ineq_file)
@@ -2596,6 +2754,18 @@ class ROT_AND_CVL(Component):
         if self.name is not None:
             return self.name
         return f"ROT_AND({self.word_length}, {self.r})"
+
+    def _to_dict(self):
+        return {
+            "type": "ROT_AND_CVL",
+            "name": self.name,
+            "word_length": int(self.word_length),
+            "r": int(self.r),
+        }
+
+    @classmethod
+    def _from_dict(cls, d):
+        return cls(d["word_length"], d["r"], name=d.get("name"))
 
     def _model_milp(self, model_options) -> MixedIntegerLinearProgram:
         raise InvalidModelOptionException(

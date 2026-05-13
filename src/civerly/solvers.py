@@ -121,6 +121,46 @@ class SOLVER_CVL:
 class MILP_SOLVER_CVL(SOLVER_CVL):
     def __init__(self):
         super().__init__()
+        
+    def solve_multiple(self, model_options, cipher=None, time_limit=None):
+        r"""
+        Find up to *n* solutions using a by-hand blocking approach.
+
+        After each solve the solution is excluded (via ``cipher.exclude_solution``),
+        the MILP model is regenerated (via ``cipher.model``), and the solver is invoked again.
+
+        Returns a list of ``(results_dict, objective_value)`` pairs ordered
+        from best to worst objective weight.
+        """
+        input_file_name  = model_options.path / (cipher.name + ".mps")
+        output_file_name = model_options.path / (cipher.name + ".sol")
+        assert isinstance(input_file_name, Path)
+        assert isinstance(output_file_name, Path)
+
+        n = model_options.number_of_solutions
+
+        all_results = []
+        solution_index = 0
+
+        while solution_index < n:
+            if solution_index == 0:
+                sol_file = output_file_name
+            else:
+                sol_file = (
+                    output_file_name.parent
+                    / f"{output_file_name.stem}_{solution_index}{output_file_name.suffix}"
+                )
+            self.invoke(input_file_name, sol_file, time_limit=time_limit)
+            r, w = self.process_solution_file(sol_file)
+
+            all_results.append((r, w))
+            solution_index += 1
+
+            if solution_index < n and cipher is not None:
+                cipher.exclude_solution(model_options, r)
+                cipher._finish_milp(model_options, cipher.milp)
+
+        return all_results
 
 
 class SAT_SOLVER_CVL(SOLVER_CVL):
@@ -311,6 +351,139 @@ class SAT_SOLVER_CVL(SOLVER_CVL):
             return int(W_MIN)
         return float(W_MIN/10**pr)
 
+    def solve_multiple(self, model_options, cipher=None, time_limit=None):
+        r"""
+        Find up to *n* solutions ordered by weight (best first).
+
+        **Strategy (by-hand blocking with weight escalation)**
+
+        1. Call :meth:`solve` to find the minimum weight *W* and the first
+           solution (binary search).  Before this call the base CNF is saved;
+           after the call *input_file_name* holds the CNF with the weight
+           constraint ``<= W``.
+
+        2. For each subsequent solution:
+
+           a. Build a *blocking clause* from the variables in ``sum_arr`` and
+              the ``SAT_IN`` variables (indices ``1 … cipher.input_length``).
+              For each variable *v* in this set, the clause literal is
+              ``¬v`` if *v* was **1** in the previous solution, or ``v``
+              otherwise.  This ensures the next solution must differ in at
+              least one of these bits.
+
+           b. Append the clause to *input_file_name* (accumulating across
+              iterations) and invoke the solver.
+
+           c. If the result is UNSAT, all solutions at the current weight are
+              exhausted.  The weight bound is incremented by one, the CNF is
+              rebuilt from the saved base file with the new ``<= W+1``
+              constraint, and solving continues.  This repeats until SAT is
+              found or the upper bound (``model_options.solve_range[1]``) is
+              reached.
+
+        Returns a list of ``(results_dict, objective_value)`` pairs ordered
+        best to worst objective weight.
+        """
+        input_file_name  = model_options.path / (cipher.name + ".cnf")
+        output_file_name = model_options.path / (cipher.name + ".sat")
+        assert isinstance(input_file_name, Path)
+        assert isinstance(output_file_name, Path)
+
+        n = model_options.number_of_solutions
+
+        pr = model_options.sat_precision if model_options is not None else 0
+        W_MAX_INT = (
+            int(model_options.solve_range[1] * 10**pr)
+            if model_options is not None else 100
+        )
+
+        # Save the base CNF before solve() overwrites input_file_name.
+        base_cnf_file = (
+            input_file_name.parent / f"{input_file_name.stem}_base.cnf"
+        )
+        shutil.copyfile(input_file_name, base_cnf_file)
+
+        # --- Step 1: find minimum weight and first solution -----------------
+        weight = self.solve(
+            input_file_name, output_file_name,
+            model_options=model_options, time_limit=time_limit
+        )
+        current_weight_int = int(round(weight * 10**pr))
+        first_result, _ = self.process_solution_file(output_file_name)
+        all_results = [(first_result, weight)]
+
+        if n <= 1:
+            return all_results
+
+        # sum_arr is needed for weight-escalation (rebuilding CNF at a new bound).
+        sum_arr_file = (
+            input_file_name.parent / f"{input_file_name.stem}sum.json"
+        )
+        with open(sum_arr_file, 'r') as _f:
+            sum_arr = json.load(_f)
+
+        # --- Step 2: enumerate additional solutions -------------------------
+        solution_index = 1
+        while solution_index < n:
+            prev_result = all_results[-1][0]
+
+            cipher.exclude_solution(model_options, prev_result)
+
+            tmp_sat_file = (
+                input_file_name.parent
+                / f"{input_file_name.stem}_sol{solution_index}.sat"
+            )
+
+            status = self.invoke(input_file_name, tmp_sat_file,
+                                 time_limit=time_limit)
+            if status is not None:
+                break  # solver error or timeout
+
+            with open(tmp_sat_file, 'r') as _f:
+                result_line = _f.readlines()[0].strip()
+
+            if result_line in ("UNSAT", "s UNSATISFIABLE"):
+                # All solutions at current_weight_int are exhausted.
+                # Rebuild from the base CNF at increasing weights until SAT.
+                advanced = False
+                while current_weight_int < W_MAX_INT:
+                    current_weight_int += 1
+                    base_sat = DIMACS()
+                    base_sat.read(str(base_cnf_file))
+                    new_cnf = _generate_constraints_sum_leq_int_LS24(
+                        base_sat, sum_arr, current_weight_int
+                    )
+                    new_cnf.write(input_file_name)
+
+                    status = self.invoke(input_file_name, tmp_sat_file,
+                                         time_limit=time_limit)
+                    if status is not None:
+                        break  # solver error or timeout
+
+                    with open(tmp_sat_file, 'r') as _f:
+                        result_line = _f.readlines()[0].strip()
+
+                    if result_line not in ("UNSAT", "s UNSATISFIABLE"):
+                        advanced = True
+                        break
+
+                if not advanced or status is not None:
+                    break  # no more solutions in range
+
+            # Process the SAT result (whether at the original weight or a new one).
+            current_weight = (
+                current_weight_int if pr == 0
+                else float(current_weight_int / 10**pr)
+            )
+            with open(tmp_sat_file, 'a') as _f:
+                _f.write(str(float(current_weight)) + "\n")
+
+            result, w = self.process_solution_file(tmp_sat_file)
+            all_results.append((result, w))
+            solution_index += 1
+
+        return all_results
+
 
 class LOGIC_MINIMIZER_CVL(SOLVER_CVL):
     """
@@ -343,10 +516,13 @@ class GUROBI_CVL(MILP_SOLVER_CVL):
         )
         command = [
             "gurobi_cl", f"ResultFile={output_file_name}",
-            f"LogFile={log_file_name}", str(input_file_name)
+            str(input_file_name)
         ]
         if time_limit is not None:
             command.insert(2, f"TimeLimit={time_limit}")
+            
+        if log_file_name is not None:
+            command.insert(2, f"LogFile={log_file_name}")
 
         with suppress_output():
             process = subprocess.Popen(command)
@@ -433,6 +609,121 @@ class GUROBI_CVL(MILP_SOLVER_CVL):
             value = __string_to_int_gurobi(line[line.index(" ")+1:])
             results[name] = value
         return _to_dict(results), objective_value
+
+
+    def solve_multiple(self, model_options, cipher=None, time_limit=None):
+        r"""
+        Find up to *n* optimal solutions using Gurobi's solution pool.
+
+        A single Gurobi invocation with ``PoolSearchMode=2`` and ``PoolGap=0``
+        finds the optimum and then systematically enumerates additional
+        solutions of equal quality, writing each to a numbered ``.sol`` file.
+
+        Gurobi pool parameters used:
+
+        - ``PoolSolutions=n``  – keep at most *n* solutions.
+        - ``PoolSearchMode=2`` – systematically enumerate pool solutions.
+        - ``PoolGap=0``        – only accept solutions matching the optimum.
+        - ``SolFiles=<prefix>``– write pool solutions as
+          ``<prefix>0.sol``, ``<prefix>1.sol``, …
+
+        Returns a list of ``(results_dict, objective_value)`` pairs
+        (at most *n* entries).
+        """
+
+        def solutionpooljson_to_solfiles(json_file_name, output_file_name):
+            """
+            The optimal solutions in the Gurobi solution pool can only be retrieved
+            in form of a JSON file. In order to make the program flow coherent
+            to the other solvers, write each solution into a new .sol file.
+            """
+            with open(json_file_name, 'r') as f:
+                data = json.load(f)
+
+            num_solutions = data['SolutionInfo']['SolCount']
+
+            for sol_idx in range(num_solutions):
+                obj_val = data['SolutionInfo']['PoolNObjVal'][sol_idx]
+                
+                sol_file = (
+                    output_file_name.parent
+                    / f"{output_file_name.stem}_{sol_idx}.sol"
+                )
+
+                with open(sol_file, 'w') as f:
+                    f.write(f"# Objective value = {obj_val}\n")
+                    
+                    for var in data['Vars']:
+                        var_name = var['VarName']
+                        var_value = var['PoolNX'][sol_idx]
+                        f.write(f"{var_name} {var_value}\n")
+            return
+
+
+        input_file_name  = model_options.path / (cipher.name + ".mps")
+        output_file_name = model_options.path / (cipher.name + ".sol")
+        assert isinstance(input_file_name, Path)
+        assert isinstance(output_file_name, Path)
+
+        n = model_options.number_of_solutions
+
+        parent = output_file_name.parent
+        stem = output_file_name.stem
+        log_file_name = parent / f"{stem}_{self.name}.log"
+        json_file_name = parent / f"{stem}_pool.json"
+        command = [
+            "gurobi_cl",
+            "PoolSearchMode=2",
+            f"LogFile={log_file_name}",
+            f"PoolSolutions={n}",
+            "JSONSolDetail=1",
+            f"ResultFile={json_file_name}",
+            str(input_file_name)
+        ]
+
+        if time_limit is not None:
+            command.insert(2, f"TimeLimit={time_limit}")
+
+        with suppress_output():
+            process = subprocess.Popen(command)
+            errno = process.wait()
+
+        if errno != 0:
+            self.status = SOLVING_STATUS.ERROR
+
+        if log_file_name.exists():
+            with open(log_file_name, 'r') as file:
+                if re.search(self.timeout_string, file.read(), re.MULTILINE):
+                    self.status = SOLVING_STATUS.TIMEOUT
+
+        if self.status != SOLVING_STATUS.SUCCESS:
+            raise SolverException(self.status)
+        
+        # convert to seperate .sol files
+        solutionpooljson_to_solfiles(
+            json_file_name=json_file_name, output_file_name=output_file_name
+        )
+
+        results = []
+        for i in range(n):
+            sol_file = (
+                output_file_name.parent
+                / f"{output_file_name.stem}_{i}.sol"
+            )
+            if not sol_file.exists():
+                print(f"{sol_file} doesnt exist")
+                continue
+            try:
+                results.append(self.process_solution_file(sol_file))
+            except (AssertionError, ValueError):
+                print(f"process solution file failed for {sol_file}")
+                continue
+
+        # Gurobi always writes the best solution to ResultFile; use as fallback
+        if not results and output_file_name.exists():
+            results.append(self.process_solution_file(output_file_name))
+
+        return results
 
 
 class SCIP_CVL(MILP_SOLVER_CVL):
@@ -889,6 +1180,9 @@ class NO_MILP_SOLVER_CVL(MILP_SOLVER_CVL):
     def solve(self, input_file_name, output_file_name, time_limit=None):
         raise NoSolverWarning()
 
+    def solve_multiple(self, model_options, cipher=None, time_limit=None):
+        raise NoSolverWarning()
+
     def process_solution_file(self, solution_file_name):
         """
         Internal helper method to process the solution file.
@@ -991,6 +1285,9 @@ class NO_SAT_SOLVER_CVL(SAT_SOLVER_CVL):
             return CRYPTOMINISAT_CVL().process_solution_file(solution_file_name)
         else:
             raise ValueError("Unknown solution format")
+
+    def solve_multiple(self, model_options, cipher=None, time_limit=None):
+        raise NoSolverWarning()
 
 
 class NO_LOGIC_MINIMIZER_CVL(LOGIC_MINIMIZER_CVL):

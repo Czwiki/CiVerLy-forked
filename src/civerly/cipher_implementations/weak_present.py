@@ -25,7 +25,7 @@ class WEAK_PRESENT_CVL:
             ....:     import WEAK_PRESENT_CVL
             sage: from civerly.model_options import *
             sage: import tempfile
-            sage: with tempfile.TemporaryDirectory() as tmpdir:  # optional - gurobi  # optional - espresso  # doctest: +ELLIPSIS +NORMALIZE_WHITESPACE
+            sage: with tempfile.TemporaryDirectory() as tmpdir:  # optional - gurobi  # optional - espresso
             ....:   weak_cipher = WEAK_PRESENT_CVL(R=2)
             ....:   model_options = MODEL_OPTIONS(
             ....:     cryptanalysis=CRYPTANALYSIS.DIFFERENTIAL,
@@ -37,8 +37,7 @@ class WEAK_PRESENT_CVL:
             ....:     path=Path(tmpdir)
             ....:   )
             ....:   weak_cipher.analyse(model_options)
-            2560 variables and 4417 constraints were written to
-            '...'
+            2560 variables and 4417 constraints were written to '...'
             3.4150374993
 
         Use SCIP solver::
@@ -47,7 +46,7 @@ class WEAK_PRESENT_CVL:
             ....:     import WEAK_PRESENT_CVL
             sage: from civerly.model_options import *
             sage: import tempfile
-            sage: with tempfile.TemporaryDirectory() as tmpdir:  # optional - scip  # optional - espresso  # doctest: +ELLIPSIS +NORMALIZE_WHITESPACE
+            sage: with tempfile.TemporaryDirectory() as tmpdir:  # optional - scip  # optional - espresso
             ....:   weak_cipher = WEAK_PRESENT_CVL(R=2)
             ....:   model_options = MODEL_OPTIONS(
             ....:     cryptanalysis=CRYPTANALYSIS.DIFFERENTIAL,
@@ -59,8 +58,7 @@ class WEAK_PRESENT_CVL:
             ....:     path=Path(tmpdir)
             ....:   )
             ....:   weak_cipher.analyse(model_options)
-            2560 variables and 4417 constraints were written to
-            '...'
+            2560 variables and 4417 constraints were written to '...'
             3.4150374993
 
         Now for linear cryptanalysis the cipher with MILP:
@@ -69,7 +67,7 @@ class WEAK_PRESENT_CVL:
             ....:     import WEAK_PRESENT_CVL
             sage: from civerly.model_options import *
             sage: import tempfile
-            sage: with tempfile.TemporaryDirectory() as tmpdir:  # optional - gurobi  # optional - espresso  # doctest: +ELLIPSIS +NORMALIZE_WHITESPACE
+            sage: with tempfile.TemporaryDirectory() as tmpdir:  # optional - gurobi  # optional - espresso
             ....:   weak_cipher = WEAK_PRESENT_CVL(R=2)
             ....:   model_options = MODEL_OPTIONS(
             ....:     cryptanalysis=CRYPTANALYSIS.LINEAR,
@@ -81,9 +79,51 @@ class WEAK_PRESENT_CVL:
             ....:     path=Path(tmpdir)
             ....:   )
             ....:   weak_cipher.analyse(model_options)
-            2560 variables and 4321 constraints were written to
-            '...'
+            2560 variables and 4321 constraints were written to '...'
             1.2451124979
+
+        Below we generate a custom model by adding constraints.
+        First analyse the cipher as per usual:
+            
+            sage: # optional - scip, espresso
+            sage: from civerly.cipher_implementations.weak_present \
+            ....:   import WEAK_PRESENT_CVL
+            sage: from civerly.model_options import *
+            sage: import tempfile
+            sage: with tempfile.TemporaryDirectory(delete=False) as tmpdir: 
+            ....:   cipher = WEAK_PRESENT_CVL(R=3)
+            ....:   model_options = MODEL_OPTIONS(
+            ....:     cryptanalysis=CRYPTANALYSIS.DIFFERENTIAL,
+            ....:     optimization=OPTIMIZATION.MILP,
+            ....:     granularity=GRANULARITY.BITWISE,
+            ....:     linear_layer_modeling=LINEAR_LAYER_MODELING.MORE_DUMMIES,
+            ....:     sbox_modeling=SBOX_MODELING.LOGICAL_COND_ESPRESSO,
+            ....:     milp_solver=SCIP_CVL(),
+            ....:     logic_minimizer=ESPRESSO_CVL(),
+            ....:     path=Path(tmpdir))
+            sage: cipher.analyse(model_options)
+            3648 variables and 6465 constraints were written to ...
+            5.4150374993
+        
+        Set all input bits to active and analyse again:
+
+            sage: # optional - scip, espresso
+            sage: for i in range(cipher.input_length):
+            ....:     cipher.milp.add_constraint(cipher.nodes[0].MILP_OUT[i] == 1)
+            sage: cipher.analyse(model_options)
+            Using existing MILP model, make sure it is up to date!
+            3648 variables and 6529 constraints were written to ...
+            61.8300749986
+            sage: cipher.results[0]['in'] == [1]*64
+            True
+            
+        Remove temporary files:
+
+            sage: # optional - scip, espresso
+            sage: import shutil
+            sage: shutil.rmtree(tmpdir)
+
+        
         """
         if name is None:
             name = "WEAK_PRESENT"

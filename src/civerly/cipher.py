@@ -34,26 +34,27 @@ EXAMPLES::
     '0x11119999'
 """
 
-from sage.modules.free_module_element import vector
 from sage.rings.finite_rings.finite_field_constructor import GF
 from sage.modules.vector_mod2_dense import Vector_mod2_dense
+from sage.matrix.constructor import Matrix as matrix
+from sage.modules.free_module_element import vector
 from sage.sat.solvers.dimacs import DIMACS
 
 from collections.abc import Iterable
-from copy import deepcopy
 from dataclasses import replace
-import json
-import subprocess
-import glob
 from math import ceil, sqrt
+from copy import deepcopy
+import subprocess
+import json
+import glob
 
-from civerly.component import Component
+from civerly.util import translate_sat_clause
+from civerly.util import suppress_output
+from civerly.model_options import InvalidModelOptionException
 from civerly.model_options import OPTIMIZATION, GRANULARITY
 from civerly.model_options import CRYPTANALYSIS
-from civerly.model_options import InvalidModelOptionException
 from civerly.solvers import NoSolverWarning
-from civerly.util import _before_brackets, _between_brackets
-from civerly.util import suppress_output, translate_sat_clause
+from civerly.component import Component
 from civerly.trail import TrailNode
 
 
@@ -94,18 +95,19 @@ class Cipher:
                 True
 
             """
-            self.cipher_instance = cipher_instance
+            self._cipher_wordsize = cipher_instance._wrd
             self._return_immediately_ = False
             self.sum_arr_milp = []
             self.sum_arr_sat = []
+            self.results = []
             if in_node:
-                self.__name = f"{self.cipher_instance.name}.IN"
-                self.__input_length = self.cipher_instance.input_length
-                self.__output_length = self.cipher_instance.input_length
+                self.__name = f"{cipher_instance.name}.IN"
+                self.__input_length = cipher_instance.input_length
+                self.__output_length = cipher_instance.input_length
             else:
-                self.__name = f"{self.cipher_instance.name}.OUT"
-                self.__input_length = self.cipher_instance.output_length
-                self.__output_length = self.cipher_instance.output_length
+                self.__name = f"{cipher_instance.name}.OUT"
+                self.__input_length = cipher_instance.output_length
+                self.__output_length = cipher_instance.output_length
             self.in_node = in_node
 
         def __hash__(self):
@@ -247,7 +249,7 @@ class Cipher:
             Component._init_model(self, model_options)
             if model_options.granularity == GRANULARITY.WORDWISE:
                 for i in range(
-                    self.input_length // self.cipher_instance.wordsize
+                    self.input_length // self._cipher_wordsize
                 ):
                     self.milp.add_constraint(
                         self.MILP_OUT[i] == self.MILP_IN[i]
@@ -299,6 +301,9 @@ class Cipher:
 
         def _copy_over_dictionaries_recursively(self, prev, model_options):
             return
+
+        def _to_dict(self):
+            return {"type": "__Special_Node"}
 
         def _to_tikz(self, _comps=[]):
             return ""
@@ -390,6 +395,12 @@ class Cipher:
         self.__input_length = input_length
         self.__output_length = output_length
         self.__name = name
+
+        # self._wrd is used for generate_report, to determine the displayed
+        # wordsize. Any subclass of WordBasedCipher will overwrite this value
+        # with `self.wordsize`
+        self._wrd = getattr(self, '_wrd', 4)
+        
         self.__is_valid = False
         self.__IN = Cipher.__Special_Node(self, in_node=True)
         self.__OUT = Cipher.__Special_Node(self, in_node=False)
@@ -397,10 +408,21 @@ class Cipher:
         self.__edges = []
         self.__outputs = [Cipher.NOT_SET]*self.__output_length
 
-        self._wrd = 4
-        # self._wrd is used for generate_report, to determine the displayed
-        # wordsize. Any subclass of WordBasedCipher will overwrite this value
-        # with `self.wordsize`
+        # self.results stores all trails found by analyse() when
+        # number_of_solutions > 1. Each entry is a dict
+        # {"in": [...], "out": [...], "weight": <value>}.
+        self.results = []
+
+
+        # self.trail_nodes stores the TrailNode objects built during
+        # analyse() for number_of_solutions > 1, one per solution.
+        # Used by generate_report() and get_trail() to avoid re-reading
+        # solution files.
+        self.trail_nodes = []
+        
+        self.milp = None
+        self.sat = None
+        self.X = None
 
     # Get-functions of various attributes:
     # --------------------------------------------------
@@ -1263,8 +1285,14 @@ class Cipher:
             # check if component was modeled before
             for i_prev, prev in enumerate(self.nodes[:i_comp]):
                 if comp == prev:
+                    # copy over attributes related to modeling
+                    comp.sat         = prev.sat
+                    comp.SAT_IN      = prev.SAT_IN
+                    comp.SAT_OUT     = prev.SAT_OUT
+                    comp.sum_arr_sat = prev.sum_arr_sat
+
                     # copy the component sat programs
-                    sats.append(sats[i_prev])
+                    sats.append(comp.sat)
 
                     # copy the dictionaries
                     self.dictionaries_sat[i_comp] = {
@@ -1488,6 +1516,7 @@ class Cipher:
                 f"'{str(model_options.path / (self.name + '.cnf'))}'"
             )
 
+        self.sat = sat
         return sat
 
     def analyse(self, model_options):
@@ -1500,26 +1529,71 @@ class Cipher:
             - ``model_options`` -- see
               :class:`civerly.model_options.MODEL_OPTIONS`
 
+        When ``model_options.number_of_solutions == 1`` (the default), a
+        single optimal trail is found and its weight is returned.
+        When ``number_of_solutions > 1``, the solver looks for that many
+        distinct solutions; the method returns a **list** of that many optimal
+        weights (one per solution found), sorted in ascending order.
+        Furthermore, all trails are available in ``self.results``
+        (list of ``{"in": ..., "out": ..., "weight": ...}`` dicts).
+
         .. WARNING::
 
             Requires the specified solver to be installed.
         """
+        # Reset per-analysis state.
+        self.results = []
+        self.trail_nodes = []
+
         if model_options.optimization == OPTIMIZATION.MILP:
-            self.model(model_options)
+            if self.milp is None:
+                self.model(model_options)
+            else:
+                print(
+                    "Using existing MILP model, make sure it is up to date!"
+                )
+                self._finish_milp(
+                    model_options, self.milp
+                )
             if model_options.milp_solver is None:
                 raise NoSolverWarning()
+            if model_options.number_of_solutions > 1:
+                all_results = model_options.milp_solver.solve_multiple(
+                    model_options=model_options,
+                    cipher=self
+                )
+                for results_and_weight in all_results:
+                    TrailNode(self, model_options, results_and_weight)
+                return [w for _, w in all_results]
             else:
                 model_options.milp_solver.solve(
                     input_file_name=model_options.path / (self.name + ".mps"),
                     output_file_name=model_options.path / (self.name + ".sol")
                 )
-                return model_options.milp_solver.process_solution_file(
-                    model_options.path / (self.name + ".sol")
-                )[1]
+                results_and_weight = self.read_results(model_options)
+                TrailNode(self, model_options, results_and_weight)
+                return results_and_weight[1]
+
         elif model_options.optimization == OPTIMIZATION.SAT:
-            self.model(model_options)
+            if self.sat is None:
+                self.model(model_options)
+            else:
+                print(
+                    "Using existing SAT model, make sure it is up to date!"
+                )
+                self._finish_sat(
+                    model_options, self.sat
+                )
             if self._return_immediately_:
                 return
+            if model_options.number_of_solutions > 1:
+                all_results = model_options.sat_solver.solve_multiple(
+                    model_options=model_options,
+                    cipher=self
+                )
+                for results_and_weight in all_results:
+                    TrailNode(self, model_options, results_and_weight)
+                return [w for _, w in all_results]
             else:
                 # if no sat_solver has been selected, we generate all cnf-files
                 # for the given solve_range
@@ -1532,9 +1606,9 @@ class Cipher:
                 if model_options.sat_solver is None:
                     raise NoSolverWarning()
                 else:
-                    return model_options.sat_solver.process_solution_file(
-                        model_options.path / (self.name + ".sat"),
-                    )[1]
+                    results_and_weight = self.read_results(model_options)
+                    TrailNode(self, model_options, results_and_weight)
+                    return results_and_weight[1]
         else:
             raise InvalidModelOptionException(
                 model_options.optimization, OPTIMIZATION
@@ -1670,16 +1744,15 @@ class Cipher:
         if model_options.optimization == OPTIMIZATION.MILP:
             solution_file_name = model_options.path / (self.name + ".sol")
             return model_options.milp_solver.process_solution_file(
-                solution_file_name) #, "MILP"
+                solution_file_name)
         elif model_options.optimization == OPTIMIZATION.SAT:
             solution_file_name = model_options.path / (self.name + ".sat")
             return model_options.sat_solver.process_solution_file(
-                solution_file_name) #, "SAT"
+                solution_file_name)
         else:
             raise InvalidModelOptionException(
                 model_options.optimization, OPTIMIZATION
             )
-
 
     def generate_report(self, model_options):
         """
@@ -1691,35 +1764,307 @@ class Cipher:
             - ``model_options`` -- see
               :class:`civerly.model_options.MODEL_OPTIONS`
 
-        OUTPUT: None, but writes a PDF file.
+        OUTPUT: None, but writes one or more PDF files.
+
+        When ``model_options.number_of_solutions == 1`` (default) a single
+        ``<name>.pdf`` is produced (existing behaviour).
+
+        When ``model_options.number_of_solutions > 1``, one PDF per solution
+        is produced, named ``<name>_sol0.pdf``, ``<name>_sol1.pdf``, …
+        The stored :attr:`trail_nodes` (populated by the preceding
+        :meth:`analyse` call) are used directly; no solution files are
+        re-read.
         """
-        # 1. Get results
-        results, objective_value = self.read_results(model_options)
 
-        # 2. Construct TrailNode tree
-        root_node = TrailNode(self, model_options, results)
-
-        # 3. Verify correctness
-        root_node.verify_correctness()
-
-        # 4. Generate LaTeX string
-        string  = self._latex_header(model_options, objective_value)
-        string += root_node.to_latex(model_options)
-        string += "\\end{document}\n"
-
-        # 5. Write to .tex file and compile to PDF
-        self._write_and_compile_tex(string, model_options)
+        if model_options.number_of_solutions == 1:
+            # ---- single-solution path (unchanged) --------------------------
+            # 1. Get results
+            results_and_weight = self.read_results(model_options)
+            # 2. Construct TrailNode
+            root_node = TrailNode(self, model_options, results_and_weight)
+            # 3. Verify correctness
+            root_node.verify_correctness()
+            # 4. Generate LaTeX string
+            string  = self._latex_header(model_options, results_and_weight[1])
+            string += root_node.to_latex(model_options)
+            string += "\\end{document}\n"
+            # 5. Write to .tex file and compile to pdf
+            self._write_and_compile_tex(string, model_options)
+        else:
+            # ---- multi-solution path ---------------------------------------
+            if not self.trail_nodes:
+                raise RuntimeError(
+                    "generate_report() with number_of_solutions > 1 requires "
+                    "analyse() to have been called first with the same "
+                    "model_options."
+                )
+            for i, (tn, sol) in enumerate(zip(self.trail_nodes, self.results)):
+                # 3. Verify correctness
+                tn.verify_correctness()
+                # 4. Generate LaTeX string
+                string  = self._latex_header(model_options, sol["weight"])
+                string += tn.to_latex(model_options)
+                string += "\\end{document}\n"
+                # 5. Write to .tex file and compile to pdf
+                self._write_and_compile_tex(
+                    string, model_options,
+                    _stem=f"{self.name}_sol{i}"
+                )
 
     def get_trail(self, model_options):
         r"""
         After solving a MILP or SAT, converts the solution values to a
-        trail-like output as a ``TrailNode`` tree. Similar to
-        ``self.generate_report``, but returns the tree instead of a PDF.
+        trail-like output as a ``TrailNode`` tree.  Similar to
+        :meth:`generate_report`, but returns the tree instead of a PDF.
+
+        When ``model_options.number_of_solutions == 1`` (default), a single
+        :class:`civerly.trail.TrailNode` is returned (existing behaviour).
+
+        When ``model_options.number_of_solutions > 1``, a **list** of
+        :class:`civerly.trail.TrailNode` objects is returned (one per
+        solution, best first).  The stored :attr:`trail_nodes` (populated by
+        the preceding :meth:`analyse` call) are returned directly.
         """
-        results, _ = self.read_results(model_options)
-        root_node = TrailNode(self, model_options, results)
-        root_node.verify_correctness()
-        return root_node
+
+        if model_options.number_of_solutions == 1:
+            results_and_weight = self.read_results(model_options)
+            root_node = TrailNode(self, model_options, results_and_weight)
+            root_node.verify_correctness()
+            return root_node
+        else:
+            if not self.trail_nodes:
+                raise RuntimeError(
+                    "get_trail() with number_of_solutions > 1 requires "
+                    "analyse() to have been called first with the same "
+                    "model_options."
+                )
+            for tn in self.trail_nodes:
+                tn.verify_correctness()
+            return list(self.trail_nodes)
+
+    def _to_dict(self):
+        r"""
+        Return a JSON-serializable dictionary representation of ``self``.
+
+        Used internally by :meth:`export` and :meth:`load`.
+        """
+        out_idx = len(self.nodes) - 1 if self.is_valid else None
+
+        node_dicts = [
+            {**n._to_dict(), "results": n.results}
+            for i, n in enumerate(self.nodes)
+            if out_idx is None or i != out_idx
+        ]
+
+        edge_dicts = [
+            ((a, b), (x, y))
+            for (a, b), (x, y) in self.edges
+            if out_idx is None or b != out_idx
+        ]
+
+        output_dicts = [
+            list(entry) if entry is not None else None
+            for entry in self.outputs
+        ]
+
+        return {
+            "type": "Cipher",
+            "name": self.name,
+            "input_length": self.input_length,
+            "output_length": self.output_length,
+            "nodes": node_dicts,
+            "edges": edge_dicts,
+            "outputs": output_dicts,
+            "results": self.results,
+        }
+
+    def export(self, path):
+        r"""
+        Write ``self`` to a JSON file at ``path``.
+
+        The file can be loaded back with :meth:`Cipher.load`.
+
+        INPUT:
+
+            - ``path`` -- string or path-like; Destination file path.
+              The ``.json`` extension is conventional but not enforced.
+
+        EXAMPLES::
+
+            sage: import tempfile, os
+            sage: from civerly.cipher import Cipher
+            sage: from civerly.component import SBox_CVL
+            sage: from sage.crypto.sbox import SBox
+            sage: cipher = Cipher(9, 9, name="test")
+            sage: sb = SBox_CVL(SBox([0, 6, 1, 4, 2, 3, 5, 7]))
+            sage: edges = [(cipher.IN, (i, i)) for i in range(3)]
+            sage: node0 = cipher.add_subcipher(sb, edges)
+            sage: edges = [(cipher.IN, (i + 3, i)) for i in range(3)]
+            sage: node1 = cipher.add_subcipher(sb, edges)
+            sage: edges = [(cipher.IN, (i + 6, i)) for i in range(3)]
+            sage: node2 = cipher.add_subcipher(sb, edges)
+            sage: cipher.add_output([(node0, (i, i)) for i in range(3)])
+            sage: cipher.add_output([(node1, (i, i + 3)) for i in range(3)])
+            sage: cipher.add_output([(node2, (i, i + 6)) for i in range(3)])
+            sage: with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            ....:     tmp = f.name
+
+        Before analysis, ``results`` is ``[]`` and round-trips as such::
+
+            sage: cipher.export(tmp)
+            Object 'test' has been exported to ...
+            sage: loaded = Cipher.load(tmp)
+            sage: cipher == loaded and loaded.results == []
+            True
+
+        After analysis, ``results`` holds the trail bit-patterns and is
+        preserved verbatim through the JSON file::
+
+            sage: from civerly.model_options import *
+            sage: model_options = MODEL_OPTIONS(
+            ....:   cryptanalysis=CRYPTANALYSIS.DIFFERENTIAL,
+            ....:   optimization=OPTIMIZATION.SAT,
+            ....:   granularity=GRANULARITY.BITWISE,
+            ....:   linear_layer_modeling=LINEAR_LAYER_MODELING.EXCLUDE_ODD,
+            ....:   sbox_modeling=SBOX_MODELING.LOGICAL_COND_ESPRESSO,
+            ....:   sat_solver=CADICAL_CVL(),
+            ....:   logic_minimizer=ESPRESSO_CVL(),
+            ....:   path=Path("DOCTEST-Export"))
+            sage: cipher.analyse(model_options)
+            ...
+            2
+            sage: cipher.export(tmp)
+            Object 'test' has been exported to ...
+            sage: loaded = Cipher.load(tmp)
+            sage: os.unlink(tmp)
+            sage: cipher == loaded and loaded.results == cipher.results
+            True
+
+        Again with a different cipher type::
+            sage: import tempfile
+            sage: from civerly.cipher import Cipher
+            sage: from civerly.cipher_implementations.aes import AES_CVL
+            sage: aes = AES_CVL(4)
+            sage: with tempfile.NamedTemporaryFile(suffix='.json') as f:
+            ....:   tmp = f.name
+            ....:   aes.export(tmp)
+            ....:   loaded = Cipher.load(tmp)
+            ....:   aes == loaded
+            Object 'AES' has been exported to ...
+            True
+
+        """
+        with open(path, "w") as f:
+            json.dump(self._to_dict(), f, default=lambda obj: int(obj))
+        print(f"Object '{self.name}' has been exported to {path}.")
+
+    @classmethod
+    def _init_from_dict(cls, d):
+        r"""
+        Construct a new empty cipher shell from a dictionary produced by
+        :meth:`_to_dict`. Override in subclasses that have a different
+        constructor signature.
+        """
+        return cls(d["input_length"], d["output_length"], name=d["name"])
+
+    @staticmethod
+    def _populate_from_dict(cipher, d):
+        r"""
+        Restore nodes, edges, outputs and results onto an empty cipher shell
+        using data from a dictionary produced by :meth:`_to_dict`.
+        """
+        from civerly.component import (
+            I_CVL, C_CVL, RK_CVL, ConstXOR_CVL, RoundkeyXOR_CVL,
+            XOR_CVL, ModAdd_CVL, AND_CVL, LinearLayer_CVL,
+            PermuteLayer_CVL, RotateLayer_CVL, SBox_CVL, ROT_AND_CVL,
+        )
+        from civerly.sboxcipher import SBoxCipher
+        from civerly.wordbasedcipher import WordBasedCipher
+        from civerly.wordsboxcipher import WordSBoxCipher
+        from civerly.aeslike import AESlike
+        from civerly.addrx import AddRX
+        from civerly.andrx import AndRX
+
+        _TYPE_MAP = {
+            "Cipher": Cipher,
+            "SBoxCipher": SBoxCipher,
+            "WordBasedCipher": WordBasedCipher,
+            "WordSBoxCipher": WordSBoxCipher,
+            "AESlike": AESlike,
+            "AddRX": AddRX,
+            "AndRX": AndRX,
+            "I_CVL": I_CVL,
+            "C_CVL": C_CVL,
+            "RK_CVL": RK_CVL,
+            "ConstXOR_CVL": ConstXOR_CVL,
+            "RoundkeyXOR_CVL": RoundkeyXOR_CVL,
+            "XOR_CVL": XOR_CVL,
+            "ModAdd_CVL": ModAdd_CVL,
+            "AND_CVL": AND_CVL,
+            "LinearLayer_CVL": LinearLayer_CVL,
+            "PermuteLayer_CVL": PermuteLayer_CVL,
+            "RotateLayer_CVL": RotateLayer_CVL,
+            "SBox_CVL": SBox_CVL,
+            "ROT_AND_CVL": ROT_AND_CVL,
+        }
+
+        def node_from_dict(nd):
+            class_var = _TYPE_MAP[nd["type"]]
+            if class_var is None:
+                raise ValueError(f"Unknown node type {nd["type"]!r} in JSON")
+            return class_var._from_dict(nd)
+
+        # Restore the IN node's result (index 0)
+        cipher.nodes[0].results = d["nodes"][0]["results"]
+        w = 1 if type(cipher) == Cipher else cipher.wordsize
+
+        for node_idx, nd in enumerate(d["nodes"][1:], start=1):
+            component = node_from_dict(nd)
+            incoming = list(set([
+                (a, (x//w, y//w))
+                for (a, b), (x, y) in d["edges"]
+                if b == node_idx
+            ]))
+            cipher.add_subcipher(component, incoming)
+            if not isinstance(component, Cipher):
+                cipher.nodes[node_idx].results = nd["results"]
+
+        output_edges = list(set([
+            (a, (x//w, y//w))
+            for y, entry in enumerate(d["outputs"])
+            if entry is not None
+            for a, x in [entry]
+        ]))
+        if output_edges:
+            cipher.add_output(output_edges)
+
+        cipher.results = d["results"]
+
+    @classmethod
+    def _from_dict(cls, d):
+        r"""
+        Reconstruct a :class:`Cipher` from a dictionary produced by
+        :meth:`_to_dict`.
+        """
+        cipher = cls._init_from_dict(d)
+        Cipher._populate_from_dict(cipher, d)
+        return cipher
+
+    @classmethod
+    def load(cls, path):
+        r"""
+        Load and return a :class:`Cipher` from the JSON file at ``path``
+        that was previously written by :meth:`export`.
+
+        INPUT:
+
+            - ``path`` -- string or path-like; Path to the JSON file.
+
+        OUTPUT: A reconstructed :class:`Cipher` instance.
+        """
+        with open(path) as f:
+            d = json.load(f)
+        return cls._from_dict(d)
 
     def _latex_header(self, model_options, objective_value) -> str:
         r"""
@@ -1764,24 +2109,16 @@ class Cipher:
         STRING += "\\begin{document}\n"
         STRING += "\\maketitle\n"
 
-        if model_options.granularity == GRANULARITY.WORDWISE:
-            STRING += f"Total number of active SBoxes: ${objective_value}$ \n"
-        elif model_options.granularity == GRANULARITY.BITWISE:
-            obj_label = {
-                CRYPTANALYSIS.DIFFERENTIAL: "differential probability",
-                CRYPTANALYSIS.LINEAR:       "linear correlation",
-            }[model_options.cryptanalysis]
-            STRING += f"Maximal {obj_label}: $2^{{-{objective_value}}}$\n"
-
         return STRING
 
-    def _write_and_compile_tex(self, string, model_options) -> None:
+    def _write_and_compile_tex(self, string, model_options, _stem=None) -> None:
         r"""
         Writes ``string`` to a ``.tex`` file and compiles it to PDF via
         ``pdflatex``, then removes auxiliary build files.
         """
-        tex_file_name = model_options.path / (self.name + ".tex")
-        pdf_file_name = model_options.path / (self.name + ".pdf")
+        stem = _stem if _stem is not None else self.name
+        tex_file_name = model_options.path / (stem + ".tex")
+        pdf_file_name = model_options.path / (stem + ".pdf")
 
         with open(tex_file_name, 'w') as f:
             f.write(string)
@@ -1826,7 +2163,20 @@ class Cipher:
         bits_in  = [row[:] for row in trail_node.bits_in]
         bits_out = [row[:] for row in trail_node.bits_out]
 
-        STRING  = f"\\section{{{self.name.replace('_', '\\_')}}}\n"
+
+        STRING  = f"\\newpage\n"
+        STRING += f"\\section{{{self.name.replace('_', '\\_')}}}\n"
+
+        w = trail_node.weight
+        if model_options.granularity == GRANULARITY.WORDWISE:
+            STRING += f"Active SBoxes: ${w}$\n\n"
+        elif model_options.granularity == GRANULARITY.BITWISE:
+            obj_label = {
+                CRYPTANALYSIS.DIFFERENTIAL: "differential probability",
+                CRYPTANALYSIS.LINEAR:       "linear correlation",
+            }[model_options.cryptanalysis]
+            STRING += f"Maximal {obj_label}: $2^{{-{w}}}$\n\n"
+
         STRING += "\\begingroup\n"
 
         if isinstance(self, AESlike):
@@ -1987,7 +2337,32 @@ class Cipher:
         STRING += "\t\\end{tikzpicture}}\n\\end{center}\n\\endgroup\n"
         return STRING
 
+    def exclude_solution(self, model_options, results):
+        if model_options.optimization == OPTIMIZATION.MILP:
+            return self._exclude_solution_milp(results)
+        elif model_options.optimization == OPTIMIZATION.SAT:
+            return self._exclude_solution_sat(results, model_options)
 
+    def _exclude_solution_sat(self, results, model_options):
+        input_file_name = model_options.path / (self.name + ".cnf")
+        sum_arr_file = model_options.path / (self.name + "sum.json")
+
+        with open(sum_arr_file, 'r') as f:
+            sum_arr = json.load(f)
+
+        sum_vars = {int(var) for _, var in sum_arr}
+        input_vars = set(range(1, self.input_length + 1))
+        blocking_var_list = sorted(sum_vars | input_vars)
+
+        blocking_clause = tuple(
+            (-v if results.get(v, 0) == 1 else v)
+            for v in blocking_var_list
+        )
+
+        sat = DIMACS()
+        sat.read(str(input_file_name))
+        sat.add_clause(blocking_clause)
+        sat.write(input_file_name)
 
     def _copy_over_dictionaries_recursively(self, prev, model_options):
         r"""

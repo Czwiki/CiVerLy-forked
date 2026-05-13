@@ -52,14 +52,13 @@ class WordBasedCipher(Cipher):
                 Sub ciphers:
 
         """
+        self.__wordsize = wordsize
+        self._wrd = wordsize
         super().__init__(
             input_num_words * wordsize,
             output_num_words * wordsize,
             name
         )
-        self.__wordsize = wordsize
-        self._wrd = wordsize
-        self.IN.wordsize = wordsize
 
     @property
     def wordsize(self):
@@ -76,6 +75,17 @@ class WordBasedCipher(Cipher):
         """
         assert self.__wordsize > 0
         return int(self.__wordsize)
+
+    def _to_dict(self):
+        d = super()._to_dict()
+        d["type"] = "WordBasedCipher"
+        d["wordsize"] = self.wordsize
+        return d
+
+    @classmethod
+    def _init_from_dict(cls, d):
+        ws = d["wordsize"]
+        return cls(ws, d["input_length"] // ws, d["output_length"] // ws, name=d["name"])
 
     def add_subcipher(self, sub_cipher, edges):
         r"""

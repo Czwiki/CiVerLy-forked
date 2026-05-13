@@ -5,9 +5,14 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from sage.rings.integer import Integer
+
 from civerly.solvers import SOLVER_CVL, LOGIC_MINIMIZER_CVL
 from civerly.solvers import MILP_SOLVER_CVL, SAT_SOLVER_CVL, LOGIC_MINIMIZER_CVL
 
+# Import all solvers, even though they are unused here.
+# This way, the user has access to ALL model options
+# when importing `civerly.model_options`.
 from civerly.solvers import NO_MILP_SOLVER_CVL, GUROBI_CVL, SCIP_CVL, GLPK_CVL
 from civerly.solvers import NO_SAT_SOLVER_CVL, CRYPTOMINISAT_CVL, CADICAL_CVL
 from civerly.solvers import NO_LOGIC_MINIMIZER_CVL, ESPRESSO_CVL
@@ -167,6 +172,7 @@ class MODEL_OPTIONS:
             -> logic_minimizer : <class 'civerly.solvers.NO_LOGIC_MINIMIZER_CVL'>
             -> solve_range : None
             -> sat_precision : 0
+            -> number_of_solutions : 1
             -> path : CiVerLy-Models
         sage: model_options = MODEL_OPTIONS(
         ....:     cryptanalysis=CRYPTANALYSIS.DIFFERENTIAL,
@@ -188,6 +194,7 @@ class MODEL_OPTIONS:
             -> logic_minimizer : <class 'civerly.solvers.NO_LOGIC_MINIMIZER_CVL'>
             -> solve_range : None
             -> sat_precision : 0
+            -> number_of_solutions : 1
             -> path : CiVerLy-Models
     """
 
@@ -202,6 +209,7 @@ class MODEL_OPTIONS:
     logic_minimizer: LOGIC_MINIMIZER_CVL = None
     solve_range: tuple = None
     sat_precision: int = 0
+    number_of_solutions: int = 1
     path: Path = None
     write_to_file: bool = True
 
@@ -282,12 +290,22 @@ class MODEL_OPTIONS:
             attribute for <enum 'CRYPTANALYSIS'>! Only DIFFERENTIAL,
             LINEAR allowed.
         """
+        if not isinstance(self.number_of_solutions, (int, Integer)) \
+                or self.number_of_solutions < 1:
+            raise InvalidModelOptionException(
+                self.number_of_solutions,
+                message=(
+                    "number_of_solutions must be a positive integer, "
+                    f"got {self.number_of_solutions!r}."
+                )
+            )
+
         if self.solve_range is not None:
             if self.solve_range[0] < 0 or \
-                    self.solve_range[0] >= self.solve_range[1]:
+                    self.solve_range[0] > self.solve_range[1]:
                 raise InvalidModelOptionException(
                     self.solve_range,
-                    message=f"{self.solve_range} is not valid!"
+                    message=f"solve_range = {self.solve_range} is not valid!"
                 )
         if self.sat_precision >= 5:
             raise InvalidModelOptionException(

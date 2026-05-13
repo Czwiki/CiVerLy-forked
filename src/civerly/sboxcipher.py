@@ -23,6 +23,7 @@ from civerly.component import SBox_CVL, LinearLayer_CVL, XOR_CVL
 from civerly.component import RK_CVL, C_CVL, I_CVL, RoundkeyXOR_CVL, ConstXOR_CVL
 from civerly.util import _before_brackets, _between_brackets, suppress_output
 from civerly.util import translate_milp_constraint
+from civerly.util import translate_var
 from civerly.model_options import OPTIMIZATION, GRANULARITY, CRYPTANALYSIS
 from civerly.model_options import InvalidModelOptionException
 
@@ -52,6 +53,11 @@ class SBoxCipher(Cipher):
                 f"The passed sub_cipher has type {type(sub_cipher)} and is "
                 "not allowed in SBoxCiphers."
             )
+
+    def _to_dict(self):
+        d = super()._to_dict()
+        d["type"] = "SBoxCipher"
+        return d
 
     def _model_milp(self, model_options, _first_iter=False):
         r"""
@@ -191,8 +197,14 @@ class SBoxCipher(Cipher):
             # check if component was modeled before
             for i_prev, prev in enumerate(self.nodes[:i_comp]):
                 if comp == prev:
+                    # copy over attributes related to modeling
+                    comp.milp         = prev.milp
+                    comp.MILP_IN      = prev.MILP_IN
+                    comp.MILP_OUT     = prev.MILP_OUT
+                    comp.sum_arr_milp = prev.sum_arr_milp
+
                     # copy the component milp programs
-                    milps.append(milps[i_prev])
+                    milps.append(comp.milp)
 
                     for key, val in self.dictionaries_milp[i_prev].items():
                         assert key[:key.index('X') + 1] == "X"
@@ -266,7 +278,6 @@ class SBoxCipher(Cipher):
                     val = asg[:asg.index("=")].strip(" ")
                     key = f"X{i_comp}[{ind}]"
                     self.dictionaries_milp[i_comp][key] = val
-                    # self.dictionaries_milp[i_comp][ind] = val
 
                 self.inv_dictionaries_milp[i_comp] = {
                     v: k for k, v in self.dictionaries_milp[i_comp].items()
@@ -547,4 +558,62 @@ class SBoxCipher(Cipher):
             with suppress_output():
                 milp.write_mps(str(model_options.path / (self.name + ".mps")))
 
+        self.milp = milp
         return milp
+
+    def _exclude_solution_milp(self, results: dict) -> None:
+        r"""
+        Convert a MILP solution *results* dict (as returned by
+        ``process_solution_file``) into a constraint which forbids this
+        solution and add it to ``self.milp``.
+
+        This ensures the exact solution cannot be found again on re-solve.
+        The constraint is added directly to ``self.milp``; callers must
+        flush ``self.milp`` to the MPS file (via ``_finish_milp``) before
+        invoking the solver again.
+
+        TESTS::
+
+            sage: # optional - scip, espresso
+            sage: from civerly.cipher_implementations.present \
+            ....:   import PRESENT_CVL
+            sage: from civerly.model_options import *
+            sage: import tempfile
+            sage: present_cipher = PRESENT_CVL(R=4)
+            sage: with tempfile.TemporaryDirectory() as tmpdir:
+            ....:   model_options = MODEL_OPTIONS(
+            ....:     cryptanalysis=CRYPTANALYSIS.DIFFERENTIAL,
+            ....:     optimization=OPTIMIZATION.MILP,
+            ....:     granularity=GRANULARITY.BITWISE,
+            ....:     sbox_modeling=SBOX_MODELING.LOGICAL_COND_ESPRESSO,
+            ....:     linear_layer_modeling=LINEAR_LAYER_MODELING.MORE_DUMMIES,
+            ....:     milp_solver=SCIP_CVL(),
+            ....:     logic_minimizer=ESPRESSO_CVL(),
+            ....:     number_of_solutions=3,
+            ....:     path=Path(tmpdir))
+            ....:   present_cipher.analyse(model_options)
+            5312 variables and 8641 constraints were written to ...
+            5312 variables and 8642 constraints were written to ...
+            5312 variables and 8643 constraints were written to ...
+            [12, 12, 12]
+            sage: t1, t2, t3 = present_cipher.get_trail(model_options)
+            sage: t1 == t2 or t1 == t3 or t2 == t3
+            False
+
+
+        """
+        # add \sum_{x_ij = 0} x_ij + \sum_{x_ij = 1} (1 - x_ij) \geq 1
+        lhs = 0
+        n_active = 0
+        for var_name, sub_dict in results.items():
+            if var_name in ("IN", "OUT"):
+                continue
+            if var_name[0] == 'X':
+                # 'X3' -> 3
+                i = int(var_name[1:])
+            for j, val in sub_dict.items():
+                assert val in (0, 1), f"{val} is not binary"
+                n_active += val
+                lhs += ((-1) ** val) * translate_var(self, self.nodes[i], self.X[i][j])
+
+        self.milp.add_constraint(lhs >= 1 - n_active)

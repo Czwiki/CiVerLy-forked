@@ -43,9 +43,10 @@ TESTS:
 import warnings
 
 import contextlib
+import random
+import zlib
 import sys
 import os
-import zlib
 
 from sage.rings.integer_ring import ZZ
 from sage.rings.integer import Integer
@@ -710,6 +711,77 @@ def _to_dict(flat_results):
         var_index = int(rest.rstrip("]"))
         nested.setdefault(var_name, {})[var_index] = value
     return nested
+
+
+def _find_path(cipher, node, path=()):
+    """
+    Helper function for ``translate_var``. Return the recursion path
+    taken to get to ``node``.
+
+        sage: from civerly.util import _find_path
+        sage: from civerly.cipher_implementations.ascon import ASCON_CVL
+        sage: ascon = ASCON_CVL(3)
+        sage: node = ascon.nodes[3].nodes[2].nodes[1]
+        sage: _find_path(ascon, node)
+        (3, 2, 1)
+        
+    """
+    from civerly.cipher import Cipher
+    if id(cipher) == id(node):
+        return path
+    if not isinstance(cipher, Cipher):
+        return None
+    for i in range(len(cipher.nodes)):
+        sub_path = _find_path(cipher.nodes[i], node, path + (i, ))
+        if sub_path is not None:
+            return sub_path
+
+def translate_var(cipher, node, local_var):
+    """
+
+    TESTS::
+        
+        sage: from civerly.cipher_implementations.craft import CRAFT_CVL
+        sage: from civerly.model_options import *
+        sage: import tempfile
+        sage: craft = CRAFT_CVL(3)
+        sage: # optional - espresso
+        sage: with tempfile.TemporaryDirectory() as tmpdir:
+        ....:   model_options = MODEL_OPTIONS(
+        ....:     cryptanalysis=CRYPTANALYSIS.DIFFERENTIAL,
+        ....:     optimization=OPTIMIZATION.SAT,
+        ....:     granularity=GRANULARITY.BITWISE,
+        ....:     linear_layer_modeling=LINEAR_LAYER_MODELING.MORE_DUMMIES,
+        ....:     sbox_modeling=SBOX_MODELING.LOGICAL_COND_ESPRESSO,
+        ....:     sat_solver=CADICAL_CVL(),
+        ....:     logic_minimizer=ESPRESSO_CVL(),
+        ....:     path=Path(tmpdir))
+        ....:   craft.model(model_options)
+        7488 variables and 17201 clauses were written to ...
+        sage: from civerly.util import translate_var
+        sage: node = craft.nodes[1].nodes[2].nodes[1]
+        sage: translate_var(craft, node, node.SAT_IN[2])
+        643
+
+
+    """
+    index_path = _find_path(cipher, node)
+    var = local_var
+    # go backwards through the recursion tree
+    for depth in range(1, len(index_path)):
+        parent = cipher
+        for index in index_path[:len(index_path) - depth]:
+            parent = parent.nodes[index]
+        index = index_path[-depth]
+        # distinguish between SAT and MILP variable
+        if isinstance(local_var, (int, Integer)):
+            var = parent.inv_dictionaries_sat[index][var]
+        else:
+            var = parent.inv_dictionaries_milp[index][var]
+
+    return var
+
+
 
 
 @contextlib.contextmanager
