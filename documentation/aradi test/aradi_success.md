@@ -3,7 +3,7 @@ participants:
 - You: Henry
 - Assistant: VS Code Copilot Chat, GPT-5.4 mini and GPT-5.2 Codex
 tooling:
-vscode: "1.21.0"
+vscode: "1.121"
 topic: "Implementation of the aradi cipher"
 
 User: Please implement the aradi cipher based on the information given and the other ciphers that are already implemented.
@@ -2145,3 +2145,93 @@ Tell me whether you want me to:
 - (B) Run an automated pure-Python variant search here (transpose / word-order) to find which variant produces the authoritative ciphertext, then I’ll patch the implementation accordingly.
 
 Made changes.
+
+date: 2026-05-26T 09:00:00Z
+participants:
+- You: Henry
+- Assistant: VS Code Copilot Chat, GPT-5.4 mini and GPT-5.2 Codex
+tooling:
+vscode: "1.211"
+topic: "Implementation of the aradi cipher"
+
+
+User: Please add some discribtions to the implemented functions. Are all the functions nessesary? There is no scenario in that we have to determine the round keys from the round keys since the latter will always be given
+
+GitHub Copilot: Optimized tool selectionI’m checking how ARADI is used and whether the key-expansion path is actually exercised, then I’ll trim the constructor if it’s dead code and add concise docstrings where the implementation is doing real work.
+
+Searched for text `ARADI_CVL(` (`**/src/**/*.py`), 1 result
+
+Searched for text `_expand_aradi_round_keys` (`**/src/**/*.py`), 3 results
+
+Searched for text `rks=` (`**/src/civerly/cipher_implementations/**/*.py`), 14 results
+
+I found the key-expansion path is only referenced inside this file, while the rest of the implementation already follows the “explicit round keys” pattern used by other ciphers. I’m reading the local constructor and helper methods now so I can remove only the unnecessary pieces and leave the cipher wiring intact.
+
+Read [](file:///Users/Uni/Documents/GitHub/CiVerLy-forked/src/civerly/cipher_implementations/aradi.py#1-1), lines 1 to 260
+
+Read [](file:///Users/Uni/Documents/GitHub/CiVerLy-forked/src/civerly/cipher_implementations/abc.py#1-1), lines 1 to 120
+
+Read [](file:///Users/Uni/Documents/GitHub/CiVerLy-forked/src/civerly/cipher_implementations/present.py#1-1), lines 1 to 120
+
+I’ve confirmed the round-key derivation is local-only and not used by the rest of the codebase. The next edit will remove that optional key path, keep the explicit round-key API, and add short docstrings to the remaining helpers so the implementation reads as a documented cipher rather than a collection of bare utilities.
+
+Searched for text `ARADI_CVL(` (`**/*.{py,rst,md}`), 43 results
+
+Searched for text `key=` (`**/src/civerly/cipher_implementations/aradi.py`), 1 result
+
+Searched for regex `_rol32|_rol16|_aradi_sbox_table|_aradi_linear_word_eval|_aradi_linear_word_matrix` (`**/src/civerly/cipher_implementations/aradi.py`), 16 results
+
+I’ve got the local shape now: the only real behavior is the S-box, linear-layer, and wiring code; the key-derivation helper is dead for the intended use. I’m editing the source to make the public API round-key only and to add docstrings on the helpers that actually participate in the cipher.
+
+Apply Patch
+
+The first patch draft was rejected on formatting, so I’m resubmitting the same source change cleanly now. It still keeps the change scoped to one file and removes only the unused key-derivation path.
+
+Generating patch (178 lines) in [](file:///Users/Uni/Documents/GitHub/CiVerLy-forked/src/civerly/cipher_implementations/aradi.py)
+
+
+```
+
+```
+The source edit is in place. I’m running a targeted validation on the touched file now to catch any syntax or interface breakage before I touch anything else.
+
+Checked [](file:///Users/Uni/Documents/GitHub/CiVerLy-forked/src/civerly/cipher_implementations/aradi.py), 3 problems found
+
+Validation only surfaced the expected Sage import-resolution noise from the environment, not a syntax problem in the edited file. I’m doing one quick sanity pass for leftover `key` references in the source so the API change is internally consistent.
+
+Searched for text `key` (`**/src/civerly/cipher_implementations/aradi.py`), 8 results
+
+The code change is complete, and I’m checking the final diff once so I can summarize the API shift precisely and call out any remaining risk from the removed key path.
+
+Read changed files in [](file:///Users/Uni/Documents/GitHub/CiVerLy-forked)
+
+The diff is clean, but I spotted one cosmetic issue at the file tail: the closing note ended up indented under the class. I’m correcting that so the module footer stays clearly module-level.
+
+Generating patch (10 lines) in [](file:///Users/Uni/Documents/GitHub/CiVerLy-forked/src/civerly/cipher_implementations/aradi.py)
+
+
+```
+
+```
+I’ve finished the structural cleanup. One last validation pass is running now; I expect the same Sage-environment import warnings and nothing else.
+
+Checked [](file:///Users/Uni/Documents/GitHub/CiVerLy-forked/src/civerly/cipher_implementations/aradi.py), 3 problems found
+
+I have the final state; I’m pulling line numbers so I can point you at the exact API and docstring changes without guessing.
+
+Read [](file:///Users/Uni/Documents/GitHub/CiVerLy-forked/src/civerly/cipher_implementations/aradi.py#1-1), lines 1 to 120
+
+Read [](file:///Users/Uni/Documents/GitHub/CiVerLy-forked/src/civerly/cipher_implementations/aradi.py#120-120), lines 120 to 202
+
+
+User: Please add some more explanations to the implementation
+
+GiHub Copilot: I’m adding a few more targeted explanations where the cipher is actually assembled: the S-box layer, the word-wise linear layer, and the round structure. That should make the implementation easier to follow without changing behavior.
+
+Edited
+aradi.py+22-3
+The explanation pass is in place. I’m doing a quick syntax check on the edited file now; if anything shows up, I’ll fix just that slice.
+
+Added more explanations in aradi.py: the constructor docstring now explains the round-key layout and the overall cipher assembly, and the round wiring has comments for the S-box layer, linear layer, round composition, and final whitening step.
+
+Validation still reports only the environment’s unresolved Sage imports; there were no new syntax issues from the edit.

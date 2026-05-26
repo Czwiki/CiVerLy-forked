@@ -6,7 +6,7 @@ follows the specification in the project documentation:
 
 - a 4-bit S-box applied in parallel across the 32 bit positions,
 - a word-wise linear layer on each 32-bit word,
-- and a 256-bit key schedule that expands to 16 round keys plus a post-add.
+- and explicit 128-bit round keys for each round plus a post-add.
 """
 
 from civerly.sboxcipher import SBoxCipher
@@ -25,18 +25,21 @@ _MASK32 = (1 << 32) - 1
 class ARADI_CVL:
     @staticmethod
     def _rol32(value, shift):
+        """Rotate a 32-bit word left by ``shift`` bits."""
         shift %= 32
         value &= _MASK32
         return ((value << shift) | (value >> (32 - shift))) & _MASK32
 
     @staticmethod
     def _rol16(value, shift):
+        """Rotate a 16-bit half-word left by ``shift`` bits."""
         shift %= 16
         value &= _MASK16
         return ((value << shift) | (value >> (16 - shift))) & _MASK16
 
     @staticmethod
     def _aradi_sbox_table():
+        """Build the 4-bit ARADI S-box truth table."""
         table = []
         for nibble in range(16):
             w = (nibble >> 3) & 1
@@ -54,6 +57,7 @@ class ARADI_CVL:
 
     @classmethod
     def _aradi_linear_word_eval(cls, word, a, b, c):
+        """Evaluate ARADI's linear layer on one 32-bit word."""
         upper = (word >> 16) & _MASK16
         lower = word & _MASK16
 
@@ -64,6 +68,7 @@ class ARADI_CVL:
 
     @classmethod
     def _aradi_linear_word_matrix(cls, a, b, c):
+        """Return the binary matrix representation for one word transform."""
         rows = []
         for basis_index in range(32):
             basis = 1 << (31 - basis_index)
@@ -71,65 +76,7 @@ class ARADI_CVL:
         # LinearLayer_CVL expects a matrix where columns represent input bits.
         return matrix(GF(2), rows)
 
-    @classmethod
-    def _expand_aradi_round_keys(cls, key, rounds):
-        if key < 0 or key >= (1 << 256):
-            raise ValueError("ARADI key must fit into 256 bits")
-
-        # Interpret the 256-bit key as a sequence of 32-bit words with the
-        # most-significant word first. This follows the test-vector byte-order
-        # convention (e.g. 0x03020100 for a 4-byte word).
-        words = [(key >> (32 * (7 - i))) & _MASK32 for i in range(8)]
-        round_keys = []
-
-        def m0(x, y):
-            new_x = cls._rol32(x, 1) ^ y
-            new_y = cls._rol32(y, 3) ^ new_x
-            return new_x & _MASK32, new_y & _MASK32
-
-        def m1(x, y):
-            new_x = cls._rol32(x, 9) ^ y
-            new_y = cls._rol32(y, 28) ^ new_x
-            return new_x & _MASK32, new_y & _MASK32
-
-        for i in range(rounds):
-            if i % 2 == 0:
-                round_keys.append(
-                    (words[0] << 96)
-                    | (words[1] << 64)
-                    | (words[2] << 32)
-                    | words[3]
-                )
-            else:
-                round_keys.append(
-                    (words[4] << 96)
-                    | (words[5] << 64)
-                    | (words[6] << 32)
-                    | words[7]
-                )
-
-            words[1], words[0] = m0(words[1], words[0])
-            words[3], words[2] = m1(words[3], words[2])
-            words[5], words[4] = m0(words[5], words[4])
-            words[7], words[6] = m1(words[7], words[6])
-            words[7] ^= i
-
-            if i % 2 == 0:
-                words[1], words[2] = words[2], words[1]
-                words[5], words[6] = words[6], words[5]
-            else:
-                words[1], words[4] = words[4], words[1]
-                words[3], words[6] = words[6], words[3]
-
-        round_keys.append(
-            (words[0] << 96)
-            | (words[1] << 64)
-            | (words[2] << 32)
-            | words[3]
-        )
-        return round_keys
-
-    def __init__(self, R=16, key=None, rks=[], name=None):
+    def __init__(self, R=16, rks=[], name=None):
         r"""
         Implement ARADI in CiVerLy.
 
@@ -137,22 +84,30 @@ class ARADI_CVL:
 
             - ``R`` -- integer; Number of rounds.
 
-            - ``key`` -- integer (optional); 256-bit master key used to derive
-              round keys when ``rks`` is not provided. Defaults to the all-zero
-              key.
-
             - ``rks`` -- list (optional); Explicit 128-bit round keys. If
-              provided, it must have length ``R + 1`` and overrides ``key``.
+              provided, it must have length ``R + 1``.
+
+                            The first ``R`` entries are used as round keys for the SPN
+                            rounds, and the final entry is applied as the post-round
+                            whitening key.
 
             - ``name`` -- string (optional); The name of the cipher.
+
+                IMPLEMENTATION NOTES:
+
+                        - The 128-bit state is represented as four 32-bit words.
+                        - The S-box layer applies the same 4-bit S-box to each bit slice
+                            across the four words.
+                        - The linear layer is built word by word from the ARADI
+                            specification parameters ``(a, b, c)``.
+                        - The cipher graph is assembled from reusable subciphers so the
+                            round structure stays close to the specification.
 
         EXAMPLES::
 
             sage: from civerly.cipher_implementations.aradi import ARADI_CVL
             sage: from civerly.util import int_to_vec, vec_to_int
-            sage: # Test vector (full encryption) from reference
-            sage: KEY = 0x1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100
-            sage: # Round keys (precomputed for the given KEY)
+            sage: # Round keys from the reference test vector
             sage: rks = [
             ....:   0x3020100070605040b0a09080f0e0d0c,
             ....:   0xa5aeb3b8a69180b73d3e3b3827202126,
@@ -179,11 +134,6 @@ class ARADI_CVL:
         if name is None:
             name = "ARADI"
 
-        if rks == []:
-            if key is None:
-                key = 0
-            rks = self._expand_aradi_round_keys(key, R)
-
         if len(rks) != R + 1:
             raise ValueError(
                 f"ARADI requires exactly R+1 round keys, got {len(rks)} for R={R}"
@@ -194,8 +144,8 @@ class ARADI_CVL:
         sbox = SBox_CVL(SBox(self._aradi_sbox_table()), name="SBox")
         sbox_layer = SBoxCipher(128, 128, name="SBoxLayer")
         for bit_index in range(32):
-            # Use direct bit_index mapping (LSB-first within words). This
-            # matches the test-vector wiring and previous working version.
+            # Each S-box instance consumes one bit from each 32-bit word,
+            # which gives a 4-bit nibble at the same bit position.
             node = sbox_layer.add_subcipher(
                 sbox,
                 [(sbox_layer.IN, (bit_index + 32 * word_index, word_index)) for word_index in range(4)]
@@ -210,6 +160,7 @@ class ARADI_CVL:
 
         linear_layer = SBoxCipher(128, 128, name="LinearLayer")
         for word_index in range(4):
+            # Build one 32-bit linear transformation per state word.
             word_matrix = self._aradi_linear_word_matrix(
                 a_values[word_index],
                 b_values[word_index],
@@ -219,7 +170,8 @@ class ARADI_CVL:
                 word_matrix,
                 name=f"L{word_index}"
             )
-            # Connect the linear word component with direct bit ordering
+            # Wire the word component so its input and output bit positions
+            # stay aligned with the surrounding 128-bit state layout.
             node = linear_layer.add_subcipher(
                 word_component,
                 [(linear_layer.IN, (32 * word_index + bit_index, bit_index)) for bit_index in range(32)]
@@ -228,6 +180,7 @@ class ARADI_CVL:
                 [(node, (bit_index, 32 * word_index + bit_index)) for bit_index in range(32)]
             )
 
+        # One ARADI round is: add round key -> S-box layer -> linear layer.
         round_cipher = SBoxCipher(128, 128, name="ARADI-round")
         rk = RoundkeyXOR_CVL(128, 0, name="RK")
         node_rk = round_cipher.add_subcipher(
@@ -243,11 +196,13 @@ class ARADI_CVL:
 
         node = cipher.IN
         for round_index in range(R):
+            # The round key component is reused; only its constant changes.
             round_cipher.nodes[1].const = rks[round_index]
             node = cipher.add_subcipher(
                 round_cipher, [(node, (bit_index, bit_index)) for bit_index in range(128)]
             )
 
+        # Final whitening step after the last round.
         post_rk = RoundkeyXOR_CVL(128, rks[R], name="PostRK")
         node = cipher.add_subcipher(
             post_rk, [(node, (bit_index, bit_index)) for bit_index in range(128)]
@@ -257,13 +212,10 @@ class ARADI_CVL:
         self.cipher = cipher
 
     def __new__(cls, *args, **kwargs):
+        """Return the constructed cipher graph instance."""
         instance = super(ARADI_CVL, cls).__new__(cls)
         instance.__init__(*args, **kwargs)
         return instance.cipher
 
 
-# Backwards-compatible thin wrappers (preferred: use ARADI_CVL methods).
-# Note: helper functions are implemented as private methods on
-# `ARADI_CVL` (e.g. `ARADI_CVL._expand_aradi_round_keys`).
-# Module-level wrappers were removed to keep the public module API
-# minimal and to match the style of other cipher implementations.
+# ARADI is intentionally configured through explicit round keys.
