@@ -1,121 +1,188 @@
-from civerly.component import Component
-from civerly.component import ConstXOR_CVL
+from sage.crypto.sbox import SBox
+
+from civerly.component import I_CVL, SBox_CVL
 from civerly.cipher import Cipher
-from civerly.util import int_to_vec, vec_to_int
 
 
-class KATAN_Component(Component):
-    def __init__(self, variant=32, R=254, key=0, name=None):
-        if variant == 32:
-            L1, L2 = 13, 19
-            xs = (12, 7, 8, 5, 3)
-            ys = (18, 7, 12, 10, 8, 3)
-            times = 1
-        elif variant == 48:
-            L1, L2 = 19, 29
-            xs = (18, 12, 15, 7, 6)
-            ys = (28, 19, 21, 13, 15, 6)
-            times = 2
-        elif variant == 64:
-            L1, L2 = 25, 39
-            xs = (24, 15, 20, 11, 9)
-            ys = (38, 25, 33, 21, 14, 9)
-            times = 3
-        else:
-            raise ValueError("Unsupported KATAN variant")
+PARAMS = {
+    32: {
+        "l1": 13,
+        "l2": 19,
+        "fa": (12, 7, 8, 5, 3),
+        "fb": (18, 7, 12, 10, 8, 3),
+        "steps": 1,
+    },
+    48: {
+        "l1": 19,
+        "l2": 29,
+        "fa": (18, 12, 15, 7, 6),
+        "fb": (28, 19, 21, 13, 15, 6),
+        "steps": 2,
+    },
+    64: {
+        "l1": 25,
+        "l2": 39,
+        "fa": (24, 15, 20, 11, 9),
+        "fb": (38, 25, 33, 21, 14, 9),
+        "steps": 3,
+    },
+}
 
-        self.variant = variant
-        self.L1 = L1
-        self.L2 = L2
-        self.block_size = L1 + L2
-        self.R = R
-        self.key = int(key)
-        self.xs = xs
-        self.ys = ys
-        self.times = times
-        if name is None:
-            name = f"KATAN{variant}"
-        super().__init__(self.block_size, self.block_size, name=name)
 
-    def eval(self, x):
-        # x is a bit vector (tuple/list). Convert to integer, L2 occupies
-        # the least significant bits, L1 the higher bits (as in spec)
-        assert len(x) == self.block_size
-        P = vec_to_int(x)
-        maskL2 = (1 << self.L2) - 1
-        L2 = P & maskL2
-        L1 = (P >> self.L2) & ((1 << self.L1) - 1)
+def _key_bits(key, rounds):
+    bits = [(int(key) >> i) & 1 for i in range(80)]
+    for i in range(80, 2 * rounds):
+        bits.append(bits[i - 80] ^ bits[i - 61] ^ bits[i - 50] ^ bits[i - 13])
+    return bits
 
-        # generate key bit sequence k_i using recurrence
-        needed = 2 * self.R * self.times
-        # ensure enough bits: need at least 2*R*times bits
-        k = [(self.key >> i) & 1 for i in range(80)]
-        for i in range(80, needed + 80 + 10):
-            # k_i = k_{i-80} xor k_{i-61} xor k_{i-50} xor k_{i-13}
-            v = k[i-80] ^ k[i-61] ^ k[i-50] ^ k[i-13]
-            k.append(v)
 
-        # counter LFSR for irregular update: 8-bit LFSR
-        ctr = [1] * 8
-        # clock once before encryption
-        def clock_ctr(s):
-            # polynomial x^8 + x^7 + x^5 + x^3 + 1 -> taps at 7,6,4,2
-            new = s[7] ^ s[6] ^ s[4] ^ s[2]
-            # shift left: drop MSB, insert new at position 0
-            return [new] + s[:7]
+def _ir_bits(rounds):
+    state = [1] * 8
 
-        ctr = clock_ctr(ctr)
+    def clock(current):
+        new_bit = current[7] ^ current[6] ^ current[4] ^ current[2]
+        return [new_bit] + current[:7]
 
-        # perform R rounds
-        ki_idx = 0
-        for round_no in range(self.R):
-            # each round may apply fa/fb multiple times (times)
-            for t in range(self.times):
-                ka = k[ki_idx]
-                kb = k[ki_idx + 1]
-                ki_idx += 2
+    state = clock(state)
+    result = []
+    for _ in range(rounds):
+        result.append(state[0])
+        state = clock(state)
+    return result
 
-                IR = ctr[-1]  # use MSB of the 8-bit LFSR as IR
 
-                # compute fa from L1
-                x1, x2, x3, x4, x5 = self.xs
-                a = ((L1 >> x1) & 1) ^ ((L1 >> x2) & 1)
-                a = a ^ (((L1 >> x3) & 1) & ((L1 >> x4) & 1))
-                a = a ^ ((((L1 >> x5) & 1) & IR))
-                a = a ^ ka
+def _fa_sbox(ir_bit, key_bit):
+    table = []
+    for value in range(1 << 5):
+        bits = [(value >> (4 - i)) & 1 for i in range(5)]
+        output = bits[0] ^ bits[1] ^ (bits[2] & bits[3])
+        if ir_bit:
+            output ^= bits[4]
+        output ^= key_bit
+        table.append(output)
+    return SBox(table)
 
-                # compute fb from L2
-                y1, y2, y3, y4, y5, y6 = self.ys
-                b = ((L2 >> y1) & 1) ^ ((L2 >> y2) & 1)
-                b = b ^ (((L2 >> y3) & 1) & ((L2 >> y4) & 1))
-                b = b ^ ((((L2 >> y5) & 1) & ((L2 >> y6) & 1)))
-                b = b ^ kb
 
-                # shift registers left and load new LSBs
-                L1 = (((L1 << 1) & ((1 << self.L1) - 1)) | b)
-                L2 = (((L2 << 1) & ((1 << self.L2) - 1)) | a)
+def _fb_sbox(key_bit):
+    table = []
+    for value in range(1 << 6):
+        bits = [(value >> (5 - i)) & 1 for i in range(6)]
+        output = bits[0] ^ bits[1] ^ (bits[2] & bits[3]) ^ (bits[4] & bits[5])
+        output ^= key_bit
+        table.append(output)
+    return SBox(table)
 
-                # update counter
-                ctr = clock_ctr(ctr)
 
-        C = (L1 << self.L2) | L2
-        return int_to_vec(C, self.block_size)
+def _register_bit_index(l1_len, l2_len, register, bit_position):
+    if register == "l1":
+        return l1_len - 1 - bit_position
+    if register == "l2":
+        return l1_len + l2_len - 1 - bit_position
+    raise ValueError("Unknown register")
 
-    def _model_milp(self, model_options):
-        raise NotImplementedError("MILP modeling for KATAN not implemented")
 
-    def _model_sat(self, model_options):
-        raise NotImplementedError("SAT modeling for KATAN not implemented")
+def _build_step_cipher(l1_len, l2_len, fa_bits, fb_bits, ir_bit, ka, kb, name):
+    step = Cipher(l1_len + l2_len, l1_len + l2_len, name=name)
+
+    fa = SBox_CVL(_fa_sbox(ir_bit, ka), name=f"{name}-fa")
+    fb = SBox_CVL(_fb_sbox(kb), name=f"{name}-fb")
+
+    fa_edges = [
+        (step.IN, (_register_bit_index(l1_len, l2_len, "l1", bit), i))
+        for i, bit in enumerate(fa_bits)
+    ]
+    fb_edges = [
+        (step.IN, (_register_bit_index(l1_len, l2_len, "l2", bit), i))
+        for i, bit in enumerate(fb_bits)
+    ]
+
+    fa_node = step.add_subcipher(fa, fa_edges)
+    fb_node = step.add_subcipher(fb, fb_edges)
+
+    for bit in range(1, l1_len):
+        route = I_CVL(1, name=f"{name}-l1-{bit}")
+        node = step.add_subcipher(
+            route,
+            [(step.IN, (_register_bit_index(l1_len, l2_len, "l1", bit - 1), 0))],
+        )
+        step.add_output([(node, (0, _register_bit_index(l1_len, l2_len, "l1", bit)))])
+
+    for bit in range(1, l2_len):
+        route = I_CVL(1, name=f"{name}-l2-{bit}")
+        node = step.add_subcipher(
+            route,
+            [(step.IN, (_register_bit_index(l1_len, l2_len, "l2", bit - 1), 0))],
+        )
+        step.add_output([(node, (0, _register_bit_index(l1_len, l2_len, "l2", bit)))])
+
+    step.add_output([(fa_node, (0, _register_bit_index(l1_len, l2_len, "l2", 0)))])
+    step.add_output([(fb_node, (0, _register_bit_index(l1_len, l2_len, "l1", 0)))])
+    return step
+
+
+def _build_round_cipher(variant, round_index, ka, kb, ir_bit):
+    params = PARAMS[variant]
+    l1_len = params["l1"]
+    l2_len = params["l2"]
+    fa_bits = params["fa"]
+    fb_bits = params["fb"]
+    steps = params["steps"]
+
+    round_cipher = Cipher(l1_len + l2_len, l1_len + l2_len, name=f"KATAN{variant}-r{round_index}")
+    node = round_cipher.IN
+    for step_idx in range(steps):
+        step = _build_step_cipher(
+            l1_len,
+            l2_len,
+            fa_bits,
+            fb_bits,
+            ir_bit,
+            ka,
+            kb,
+            name=f"KATAN{variant}-r{round_index}-s{step_idx}",
+        )
+        node = round_cipher.add_subcipher(
+            step,
+            [(node, (i, i)) for i in range(l1_len + l2_len)],
+        )
+    round_cipher.add_output([(node, (i, i)) for i in range(l1_len + l2_len)])
+    return round_cipher
 
 
 class KATAN_CVL:
     def __init__(self, variant=32, R=254, key=0, name=None):
+        if variant not in PARAMS:
+            raise ValueError("Unsupported KATAN variant")
+
+        params = PARAMS[variant]
+        l1_len = params["l1"]
+        l2_len = params["l2"]
+        block_size = l1_len + l2_len
+
         if name is None:
             name = f"KATAN{variant}"
-        comp = KATAN_Component(variant=variant, R=R, key=key, name=name)
-        cipher = Cipher(comp.input_length, comp.output_length, name=name)
-        node = cipher.add_subcipher(comp, [(cipher.IN, (i, i)) for i in range(comp.input_length)])
-        cipher.add_output([(node, (i, i)) for i in range(comp.output_length)])
+
+        key_stream = _key_bits(key, R)
+        ir_stream = _ir_bits(R)
+
+        cipher = Cipher(block_size, block_size, name=name)
+        node = cipher.IN
+        for round_index in range(R):
+            ka = key_stream[2 * round_index]
+            kb = key_stream[2 * round_index + 1]
+            round_cipher = _build_round_cipher(
+                variant,
+                round_index,
+                ka,
+                kb,
+                ir_stream[round_index],
+            )
+            node = cipher.add_subcipher(
+                round_cipher,
+                [(node, (i, i)) for i in range(block_size)],
+            )
+
+        cipher.add_output([(node, (i, i)) for i in range(block_size)])
         self.cipher = cipher
 
     def __new__(cls, *args, **kwargs):
