@@ -1,3 +1,15 @@
+"""
+KATAN implementation for CiVerLy.
+
+Reference implementation and attribution:
+- Original C reference by Orr Dunkelman: http://www.cs.technion.ac.il/~orrd/KATAN/katan.c
+- Public gist fork used for verification: https://gist.github.com/raullenchai/2712516
+
+This Python/Sage implementation was validated against the C reference
+included in documentation/reference_implementation_katan.c. Consult the
+original sources for licensing and full attribution.
+"""
+
 from sage.crypto.sbox import SBox
 
 from civerly.component import I_CVL, SBox_CVL
@@ -147,6 +159,92 @@ def _build_round_cipher(variant, round_index, ka, kb, ir_bit):
         )
     round_cipher.add_output([(node, (i, i)) for i in range(l1_len + l2_len)])
     return round_cipher
+
+
+def reference_katan_encrypt(variant, plaintext_int, key_int, rounds):
+    r"""Reference Python implementation mirroring the C reference.
+
+    Returns integer ciphertext. Used for doctests.
+
+    Examples (small rounds):
+
+    >>> from civerly.cipher_implementations.katan import KATAN_CVL, reference_katan_encrypt
+    >>> from civerly.util import int_to_vec, vec_to_int
+    >>> key = 0x0123456789abcdef0123  # 80-bit example key
+    >>> pt32 = 0x12345678
+    >>> c = KATAN_CVL(variant=32, R=10, key=key)
+    >>> vec_to_int(c(int_to_vec(pt32, 32))) == reference_katan_encrypt(32, pt32, key, 10)
+    True
+
+    >>> pt48 = 0x123456789abc
+    >>> c48 = KATAN_CVL(variant=48, R=8, key=key)
+    >>> vec_to_int(c48(int_to_vec(pt48, 48))) == reference_katan_encrypt(48, pt48, key, 8)
+    True
+
+    >>> pt64 = 0x0123456789abcdef
+    >>> c64 = KATAN_CVL(variant=64, R=6, key=key)
+    >>> vec_to_int(c64(int_to_vec(pt64, 64))) == reference_katan_encrypt(64, pt64, key, 6)
+    True
+    """
+    params = PARAMS[variant]
+    l1 = params["l1"]
+    l2 = params["l2"]
+    fa_pos = params["fa"]
+    fb_pos = params["fb"]
+    steps = params["steps"]
+
+    # initialize L1 and L2 as lists of bits, index 0 = least significant
+    mask_l2 = (1 << l2) - 1
+    L2 = [(plaintext_int >> i) & 1 for i in range(l2)]
+    L1 = [((plaintext_int >> (l2 + i)) & 1) for i in range(l1)]
+
+    # key bits
+    k = [(int(key_int) >> i) & 1 for i in range(80)]
+    for i in range(80, 2 * rounds):
+        k.append(k[i - 80] ^ k[i - 61] ^ k[i - 50] ^ k[i - 13])
+
+    # IR stream
+    ir = _ir_bits(rounds)
+
+    for r in range(rounds):
+        if steps == 1:
+            fa = L1[fa_pos[0]] ^ L1[fa_pos[1]] ^ (L1[fa_pos[2]] & L1[fa_pos[3]]) ^ ((L1[fa_pos[4]] & ir[r])) ^ k[2 * r]
+            fb = L2[fb_pos[0]] ^ L2[fb_pos[1]] ^ (L2[fb_pos[2]] & L2[fb_pos[3]]) ^ ((L2[fb_pos[4]] & L2[fb_pos[5]])) ^ k[2 * r + 1]
+
+            # shift left (towards higher index), dropping MSB (last element)
+            L1 = [fb] + L1[:-1]
+            L2 = [fa] + L2[:-1]
+
+        elif steps == 2:
+            fa_1 = L1[fa_pos[0]] ^ L1[fa_pos[1]] ^ (L1[fa_pos[2]] & L1[fa_pos[3]]) ^ ((L1[fa_pos[4]] & ir[r])) ^ k[2 * r]
+            fa_0 = L1[fa_pos[0] - 1] ^ L1[fa_pos[1] - 1] ^ (L1[fa_pos[2] - 1] & L1[fa_pos[3] - 1]) ^ ((L1[fa_pos[4] - 1] & ir[r])) ^ k[2 * r]
+            fb_1 = L2[fb_pos[0]] ^ L2[fb_pos[1]] ^ (L2[fb_pos[2]] & L2[fb_pos[3]]) ^ ((L2[fb_pos[4]] & L2[fb_pos[5]])) ^ k[2 * r + 1]
+            fb_0 = L2[fb_pos[0] - 1] ^ L2[fb_pos[1] - 1] ^ (L2[fb_pos[2] - 1] & L2[fb_pos[3] - 1]) ^ ((L2[fb_pos[4] - 1] & L2[fb_pos[5] - 1])) ^ k[2 * r + 1]
+
+            L1 = [fb_0, fb_1] + L1[:-2]
+            L2 = [fa_0, fa_1] + L2[:-2]
+
+        elif steps == 3:
+            fa_2 = L1[fa_pos[0]] ^ L1[fa_pos[1]] ^ (L1[fa_pos[2]] & L1[fa_pos[3]]) ^ ((L1[fa_pos[4]] & ir[r])) ^ k[2 * r]
+            fa_1 = L1[fa_pos[0] - 1] ^ L1[fa_pos[1] - 1] ^ (L1[fa_pos[2] - 1] & L1[fa_pos[3] - 1]) ^ ((L1[fa_pos[4] - 1] & ir[r])) ^ k[2 * r]
+            fa_0 = L1[fa_pos[0] - 2] ^ L1[fa_pos[1] - 2] ^ (L1[fa_pos[2] - 2] & L1[fa_pos[3] - 2]) ^ ((L1[fa_pos[4] - 2] & ir[r])) ^ k[2 * r]
+            fb_2 = L2[fb_pos[0]] ^ L2[fb_pos[1]] ^ (L2[fb_pos[2]] & L2[fb_pos[3]]) ^ ((L2[fb_pos[4]] & L2[fb_pos[5]])) ^ k[2 * r + 1]
+            fb_1 = L2[fb_pos[0] - 1] ^ L2[fb_pos[1] - 1] ^ (L2[fb_pos[2] - 1] & L2[fb_pos[3] - 1]) ^ ((L2[fb_pos[4] - 1] & L2[fb_pos[5] - 1])) ^ k[2 * r + 1]
+            fb_0 = L2[fb_pos[0] - 2] ^ L2[fb_pos[1] - 2] ^ (L2[fb_pos[2] - 2] & L2[fb_pos[3] - 2]) ^ ((L2[fb_pos[4] - 2] & L2[fb_pos[5] - 2])) ^ k[2 * r + 1]
+
+            L1 = [fb_0, fb_1, fb_2] + L1[:-3]
+            L2 = [fa_0, fa_1, fa_2] + L2[:-3]
+
+        else:
+            raise ValueError("Unsupported steps")
+
+    # recombine
+    out = 0
+    for i in range(l1 - 1, -1, -1):
+        out = (out << 1) | L1[i]
+    for i in range(l2 - 1, -1, -1):
+        out = (out << 1) | L2[i]
+    return out
 
 
 class KATAN_CVL:

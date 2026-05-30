@@ -173,3 +173,13 @@ ciphers can be doubled or even tripled. To increase the speed of the cipher, we 
 (triple) the logic for the nonlinear functions fa and fb as well as the logic for the feedback
 coefficients of the counter and the key register. The implementation results are given in
 Appendix B
+
+Reference implementation
+------------------------
+A C reference implementation was used to validate the CiVerLy implementation and
+to generate test vectors. The original reference code is available from Orr Dunkelman
+(Technion) at http://www.cs.technion.ac.il/~orrd/KATAN/katan.c and a public fork
+was taken from https://gist.github.com/raullenchai/2712516. A copy of the
+reference C code is included in this repository at documentation/reference_implementation_katan.c.
+
+Please consult the original sources for licensing and attribution details.
