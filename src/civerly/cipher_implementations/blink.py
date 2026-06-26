@@ -34,31 +34,35 @@ from sage.rings.finite_rings.finite_field_constructor import GF
 from sage.crypto.sbox import SBox
 
 
-def _create_blink_mixcolumn_matrix():
+def _create_blink_mixcolumn_matrix(block_size_bits):
     r"""
-    Create the MixColumn matrix for Blink operating on a single column.
-    
+    Create the MixColumn matrix for Blink.
+
     The Blink MixColumn uses the Midori MixColumn matrix:
     M = [[0, 1, 1, 1],
          [1, 0, 1, 1],
          [1, 1, 0, 1],
          [1, 1, 1, 0]]
-    
+
     This matrix is applied to each 4-nibble column independently.
+    The number of columns is block_size_bits / 16 (since each column has 4 nibbles).
     """
     M_nibble = [[0, 1, 1, 1],
                 [1, 0, 1, 1],
                 [1, 1, 0, 1],
                 [1, 1, 1, 0]]
-    
-    # Create 16×16 block diagonal matrix with 4 copies for 4 columns
-    M = matrix(GF(2), 16, 16)
-    for col_idx in range(4):
+
+    block_size_words = block_size_bits // 4
+    num_columns = block_size_words // 4
+
+    # Create block-diagonal matrix with 4×4 nibble matrix repeated for each column
+    M = matrix(GF(2), block_size_bits, block_size_bits)
+    for col_idx in range(num_columns):
         for row in range(4):
             for col in range(4):
                 if M_nibble[row][col] == 1:
                     M[col_idx * 4 + row, col_idx * 4 + col] = 1
-    
+
     return M
 
 
@@ -114,8 +118,7 @@ class BLINK64_CVL:
             sboxlayer.add_output([(node, (0, j))])
 
         # MixColumn: block-diagonal with 4 copies (one per column)
-        M = _create_blink_mixcolumn_matrix()
-        mixcolumn = LinearLayer_CVL(M, branch_number_differential=5,
+        mixcolumn = LinearLayer_CVL(_create_blink_mixcolumn_matrix(block_size_bits), branch_number_differential=5,
                                     branch_number_linear=5, name="MixColumn")
 
         # Shuffle permutation
@@ -133,23 +136,20 @@ class BLINK64_CVL:
                                          [(blink_round.IN, (i, i)) for i in range(block_size_words)])
         node = blink_round.add_subcipher(mixcolumn,
                                          [(node, (i, i)) for i in range(block_size_words)])
-        node = blink_round.add_subcipher(key_add,
-                                         [(node, (i, i)) for i in range(block_size_words)])
+        node_key = blink_round.add_subcipher(key_add,
+                                           [(node, (i, i)) for i in range(block_size_words)])
         node = blink_round.add_subcipher(shuffle_perm,
-                                         [(node, (i, i)) for i in range(block_size_words)])
+                                         [(node_key, (i, i)) for i in range(block_size_words)])
         blink_round.add_output([(node, (i, i)) for i in range(block_size_words)])
 
         # Build the full cipher
         blink_cipher = WordSBoxCipher(wordsize, block_size_words, block_size_words,
-                                      name=name)
+                                     name=name)
 
         cipher_node = blink_cipher.IN
         for r in range(R):
             # Set round key
-            for node in blink_round.nodes.values():
-                if isinstance(node, RoundkeyXOR_CVL):
-                    node.const = rks[r]
-                    break
+            blink_round.nodes[node_key].const = rks[r]
             cipher_node = blink_cipher.add_subcipher(
                 blink_round, [(cipher_node, (i, i)) for i in range(block_size_words)]
             )
@@ -224,19 +224,7 @@ class BLINK128_CVL:
             sboxlayer.add_output([(node, (0, j))])
 
         # MixColumn: block-diagonal with 8 copies (one per column for 128-bit)
-        M_nibble = [[0, 1, 1, 1],
-                    [1, 0, 1, 1],
-                    [1, 1, 0, 1],
-                    [1, 1, 1, 0]]
-        
-        M = matrix(GF(2), 32, 32)
-        for col_idx in range(8):  # 8 columns for 128-bit
-            for row in range(4):
-                for col in range(4):
-                    if M_nibble[row][col] == 1:
-                        M[col_idx * 4 + row, col_idx * 4 + col] = 1
-
-        mixcolumn = LinearLayer_CVL(M, branch_number_differential=5,
+        mixcolumn = LinearLayer_CVL(_create_blink_mixcolumn_matrix(block_size_bits), branch_number_differential=5,
                                     branch_number_linear=5, name="MixColumn")
 
         # Shuffle permutation for 128-bit
@@ -255,23 +243,20 @@ class BLINK128_CVL:
                                          [(blink_round.IN, (i, i)) for i in range(block_size_words)])
         node = blink_round.add_subcipher(mixcolumn,
                                          [(node, (i, i)) for i in range(block_size_words)])
-        node = blink_round.add_subcipher(key_add,
-                                         [(node, (i, i)) for i in range(block_size_words)])
+        node_key = blink_round.add_subcipher(key_add,
+                                           [(node, (i, i)) for i in range(block_size_words)])
         node = blink_round.add_subcipher(shuffle_perm,
-                                         [(node, (i, i)) for i in range(block_size_words)])
+                                         [(node_key, (i, i)) for i in range(block_size_words)])
         blink_round.add_output([(node, (i, i)) for i in range(block_size_words)])
 
         # Build the full cipher
         blink_cipher = WordSBoxCipher(wordsize, block_size_words, block_size_words,
-                                      name=name)
+                                     name=name)
 
         cipher_node = blink_cipher.IN
         for r in range(R):
             # Set round key
-            for node in blink_round.nodes.values():
-                if isinstance(node, RoundkeyXOR_CVL):
-                    node.const = rks[r]
-                    break
+            blink_round.nodes[node_key].const = rks[r]
             cipher_node = blink_cipher.add_subcipher(
                 blink_round, [(cipher_node, (i, i)) for i in range(block_size_words)]
             )
