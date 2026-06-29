@@ -185,13 +185,20 @@ Blink is implemented as a `WordSBoxCipher` with `wordsize=4`:
 - Word-based edges are used internally
 - Supports efficient word-wise MILP modeling
 
-## Verification
+## Known Limitations
 
-The implementation follows the official Blink specification and includes:
-- Correct S-box values and properties
-- Proper MixColumn matrix structure
-- Accurate permutation patterns for both variants
-- Correct round function composition
+The current implementation models the Blink **round function** as an iterated
+SPN (`S → M → AK → P`). It does **not** implement the full THF mode from the
+paper, which includes:
+
+- The key schedule (Section 5.4)
+- Round constants (Appendix D)
+- Tweak hash functions `h₁`, `h₂` (Section 5.3)
+- The reflector construction (Figure 2)
+
+Consequently the outputs of `BLINK64_CVL` / `BLINK128_CVL` will **not** match
+the reference test vectors from the Blink specification exactly.  The
+implementation is still fully usable for MILP / SAT cryptanalysis in CiVerLy.
 
 ## Testing
 
