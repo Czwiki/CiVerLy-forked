@@ -188,17 +188,50 @@ Blink is implemented as a `WordSBoxCipher` with `wordsize=4`:
 ## Known Limitations
 
 The current implementation models the Blink **round function** as an iterated
-SPN (`S → M → AK → P`). It does **not** implement the full THF mode from the
-paper, which includes:
+SPN (`S -> M -> AK -> P`).  The standalone THF utilities below implement the
+key schedule, hash functions, and reflector, but the exact THF construction
+details from the reference implementation are still pending confirmation
+(particularly the precise `π` definitions, `dh(t)` handling, and round-key
+indexing conventions for the bottom half).  Consequently the outputs of
+`THF_Blink_Encryptor` will **not** match the reference test vectors exactly
+yet.  The implementation is still fully usable for MILP / SAT cryptanalysis in
+CiVerLy.
 
-- The key schedule (Section 5.4)
-- Round constants (Appendix D)
-- Tweak hash functions `h₁`, `h₂` (Section 5.3)
-- The reflector construction (Figure 2)
+## THF Testing Utilities
 
-Consequently the outputs of `BLINK64_CVL` / `BLINK128_CVL` will **not** match
-the reference test vectors from the Blink specification exactly.  The
-implementation is still fully usable for MILP / SAT cryptanalysis in CiVerLy.
+Standalone helpers for the Blink THF mode (for testing only, *not* integrated
+into `BLINK64_CVL` / `BLINK128_CVL`):
+
+### `blink_round_constants_64()` / `blink_round_constants_128()`
+Returns `(rc, rc_prime)` from Appendix D of the THF paper.
+
+### `blink_k_prime(k, total_bits)`
+Computes the key-schedule rearrangement `k'[i] = k[(11*i) mod N]`.
+
+### `blink_key_schedule(k, n, a, b)`
+Parses the master key into round keys `rk`, whitening keys `w1`, `w2`, and
+Toeplitz hash keys `k1`, `k2`.
+
+### `blink_toeplitz_hash(k_hash, t, n, tau)`
+Toeplitz hash used for `h1(t)` and `h2(t)` (Section 5.3).
+
+### `THF_Blink_Encryptor(variant)`
+Full THF encryptor supporting `"64a"`, `"128a"`, and `"128A"` variants.
+Implements the top `a` rounds, `h1` addition, top `b` rounds, reflector
+`S -> MK_h -> S`, bottom `b` inverse rounds, `h2` addition, bottom `a`
+inverse rounds, and whitening.
+
+#### Usage Example
+
+```python
+from civerly.cipher_implementations.blink import THF_Blink_Encryptor
+
+enc = THF_Blink_Encryptor("64a")
+k_64a = 0xd6a102d888a467e4d1d7dec33a246943e07c1dc6f302c57e762c2df9de6f0d216dd387874a0b52ce3022e0ad78c78a0697779021b38e7fa1
+c = enc.encrypt(m=0x0, t=0x0123456789abcdef, k=k_64a)
+# Current output: 0xa09a803255fdb13b
+# Paper test vector: 0xa4a0d10502be846e
+```
 
 ## Testing
 
