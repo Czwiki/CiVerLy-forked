@@ -26,6 +26,166 @@ from civerly.sboxcipher import SBoxCipher
 from civerly.component import SBox_CVL, LinearLayer_CVL, RoundkeyXOR_CVL
 
 
+PHI = 0x9e3779b9
+
+
+def _rotl32(x, n):
+    r"""
+    Rotate left a 32-bit word ``x`` by ``n`` bits.
+
+    INPUT:
+
+        - ``x`` -- integer; The 32-bit word to rotate.
+
+        - ``n`` -- integer; Number of bits to rotate by.
+
+    OUTPUT: The rotated 32-bit word.
+    """
+    x = int(x) & 0xffffffff
+    n = int(n) % 32
+    return ((x << n) | (x >> (32 - n))) & 0xffffffff
+
+
+def _bit_reverse32(x):
+    r"""
+    Reverse the bits within a 32-bit word.
+
+    INPUT:
+
+        - ``x`` -- integer; A 32-bit word.
+
+    OUTPUT: The bit-reversed 32-bit word.
+    """
+    x = int(x) & 0xffffffff
+    res = 0
+    for i in range(32):
+        if (x >> i) & 1:
+            res |= 1 << (31 - i)
+    return res
+
+
+def serpent_key_schedule(key, keylen=128, R=32):
+    r"""
+    Generate round keys for the Serpent block cipher.
+
+    Serpent requires 33 128-bit subkeys. The user key is first padded to
+    256 bits if necessary, then expanded to 132 prekey words via an affine
+    recurrence, and finally transformed by the S-boxes in bitslice mode.
+
+    The round keys are returned as 128-bit integers, compatible with the
+    ``rks`` parameter of :class:`SERPENT_CVL`.
+
+    INPUT:
+
+        - ``key`` -- integer; The user-supplied key.
+
+        - ``keylen`` -- integer (default: ``128``); The key length in bits.
+          Must be at most ``256``.
+
+        - ``R`` -- integer (default: ``32``); Number of rounds. The function
+          returns ``R + 1`` round keys.
+
+    OUTPUT: A list of ``R + 1`` round key integers.
+
+    EXAMPLES::
+
+        sage: from civerly.cipher_implementations.serpent import serpent_key_schedule
+        sage: rks = serpent_key_schedule(0, keylen=128)
+        sage: len(rks)
+        33
+        sage: hex(rks[0])
+        '0x49ceeb71b709994f73c5c5e54bb9eaf6'
+        sage: hex(rks[1])
+        '0xf985cb82ebc3c40612b2643770da4801'
+        sage: hex(rks[2])
+        '0x6443104a3c5603b7a39467a12657931f'
+
+        sage: rks = serpent_key_schedule(0, keylen=256)
+        sage: hex(rks[0])
+        '0x9ceeb71b7199b4f73c5c7e50ba9eaf6'
+        sage: hex(rks[1])
+        '0x9995c8828bd7c50652aa673750ce4901'
+        sage: hex(rks[2])
+        '0x544b108a3c5402f7c39267611653925f'
+
+    TESTS::
+
+        Verify with the test vector from the NESSIE suite (128-bit key)::
+
+            sage: from civerly.cipher_implementations.serpent import serpent_key_schedule
+            sage: key = int("80000000000000000000000000000000", 16)
+            sage: rks = serpent_key_schedule(key, keylen=128)
+            sage: hex(rks[0])
+            '0xc9deeb71b719994ff3d5c1e54b99eaf6'
+            sage: hex(rks[1])
+            '0xb98dcd826bd3c10652ba6437f0da4b01'
+            sage: hex(rks[2])
+            '0xb457144a4c4a0637738c6621a65f929f'
+    """
+    if keylen > 256:
+        raise ValueError("Key length must be at most 256 bits")
+    if R > 32:
+        raise ValueError("Serpent only supports up to 32 rounds")
+
+    if keylen < 256:
+        key = int(key) | (1 << keylen)
+    else:
+        key = int(key)
+
+    # Serpent uses a little-endian word order for the key schedule.
+    # Split 256 key bits into 8 words.
+    w_init = []
+    for i in range(8):
+        w_init.append((key >> (32 * i)) & 0xffffffff)
+
+    # Prekey expansion: w[i] for i = -8 .. 131
+    # Using raw_w[0..139] where raw_w[i] corresponds to w[i-8]
+    raw_w = w_init + [0] * 132
+    for i in range(132):
+        raw_w[i + 8] = _rotl32(raw_w[i] ^ raw_w[i + 3] ^ raw_w[i + 5] ^ raw_w[i + 7] ^ PHI ^ i, 11)
+
+    w = raw_w[8:140]
+
+    # Apply bitslice S-boxes to prekeys to obtain 132 round-key words.
+    # S-box sequence for each group of 4 prekey words:
+    # i=0: S3, i=1: S2, i=2: S1, i=3: S0, i=4: S7, i=5: S6, i=6: S5, i=7: S4, ...
+    # (whichS = (32 + 3 - i) % 32, accessed modulo 8)
+    k = [0] * 132
+    for i in range(33):
+        whichS = (32 + 3 - i) % 32
+        sbox = SERPENT_SBOXES[whichS % 8]
+        for j in range(32):
+            nibble = 0
+            for l in range(4):
+                bit = (w[4 * i + l] >> j) & 1
+                nibble |= bit << l
+            output = int(sbox(nibble))
+            for l in range(4):
+                bit = (output >> l) & 1
+                k[4 * i + l] |= bit << j
+
+    # Pack 4 words into a 128-bit integer compatible with CiVerLy's
+    # ``int_to_vec`` convention. Positions 0..31 of the 128-bit vector
+    # correspond to integer bit 127 down to 96. The S-box layer treats
+    # vector positions j, j+32, j+64, j+96 as the four input bits
+    # for the j-th parallel S-box.
+    rks = []
+    for i in range(R + 1):
+        w0 = k[4 * i]
+        w1 = k[4 * i + 1]
+        w2 = k[4 * i + 2]
+        w3 = k[4 * i + 3]
+        subkey = (
+            (_bit_reverse32(w3) << 96)
+            | (_bit_reverse32(w2) << 64)
+            | (_bit_reverse32(w1) << 32)
+            | _bit_reverse32(w0)
+        )
+        rks.append(subkey)
+
+    return rks
+
+
 # S-boxes definition from the Serpent specification
 SERPENT_SBOXES = [
     SBox_sage([3, 8, 15, 1, 10, 6, 5, 11, 14, 13, 4, 2, 7, 0, 9, 12]),   # S0
@@ -221,6 +381,12 @@ class SERPENT_CVL:
           Must have length R+1 (33 keys for full-round Serpent).
           Defaults to all zeros.
 
+        - ``key`` -- integer (optional); A master key from which round keys
+          are derived via :func:`serpent_key_schedule`. Ignored if ``rks``
+          is provided.
+
+        - ``keylen`` -- integer (default: ``128``); Length of ``key`` in bits.
+
         - ``name`` -- string (optional); The name of the cipher.
 
     EXAMPLES::
@@ -232,6 +398,13 @@ class SERPENT_CVL:
             sage: serpent = SERPENT_CVL(R=1)
             sage: result = serpent(int_to_vec(0x0, 128))
             sage: vec_to_int(result) > 0  # S-box output is non-zero even for zero input
+            True
+
+        Instantiate with a master key (round keys are derived automatically)::
+
+            sage: serpent = SERPENT_CVL(R=1, key=0, keylen=128)
+            sage: result = serpent(int_to_vec(0x0, 128))
+            sage: vec_to_int(result) > 0
             True
 
         Model the cipher with MILP::
@@ -255,12 +428,15 @@ class SERPENT_CVL:
 
     """
 
-    def __init__(self, R=32, rks=None, name=None):
+    def __init__(self, R=32, rks=None, key=None, keylen=128, name=None):
         if name is None:
             name = "SERPENT"
 
         if rks is None:
-            rks = [0 for _ in range(R + 1)]
+            if key is not None:
+                rks = serpent_key_schedule(key, keylen=keylen, R=R)
+            else:
+                rks = [0 for _ in range(R + 1)]
 
         # Build linear layer (same for all rounds except last)
         lt = _build_serpent_linear_layer()
