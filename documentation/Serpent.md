@@ -8,12 +8,8 @@ first word (word 0) is the least significant word, and the last word is the most
 significant, and where bit 0 is the least significant bit of word 0. Externally, we
 write each block as a plain 128-bit hex number.
 Serpent encrypts a 128-bit plaintext P to a 128-bit ciphertext C in 32 rounds
-ˆ
-ˆ
 under the control of 33 128-bit subkeys
-K0,...,
-K32. The user key length is
-variable, but for the purposes of this submission we fix it at 128, 192 or 256
+K0,...,K32. The user key length is variable, but for the purposes of this submission we fix it at 128, 192 or 256
 bits; short keys with less than 256 bits are mapped to full-length keys of 256
 bits by appending one “1” bit to the MSB end, followed by as many “0” bits
 as required to make up 256 bits. This mapping is designed to map every short
@@ -23,7 +19,6 @@ applications, then our padding method can cope with them.) There are no other
 restrictions on the keyspace.
 The cipher itself consists of:
 – an initial permutation IP;
-2
 – 32 rounds, each consisting of a key mixing operation, a pass through S-boxes,
 and (in all but the last round) a linear transformation. In the last round,
 this linear transformation is replaced by an additional key mixing operation;
@@ -33,83 +28,24 @@ They are used to simplify an optimized implementation of the cipher, which
 is described in the next section, and to improve its computational eﬃciency.
 Both these two permutations and the linear transformation are specified in the
 appendix; their design principles will be made clear in the next section.
-We use the following notation. The initial permutation IP is applied to the
-ˆ
-plaintext P giving
-B0, which is the input to the first round. The rounds are
-numbered from 0 to 31, where the first round is round 0 and the last is round 31.
-ˆ
-The output of the first round (round 0) is
-B1, the output of the second round
-ˆ
-ˆ
-(round 1) is
-B2, the output of round iis
-Bi+1, and so on, until the output of the
-last round (in which the linear transformation is replaced by an additional key
-ˆ
-mixing) is denoted by
-B32. The final permutation FP is now applied to give the
-ciphertext C.
-Each round function Ri (i∈{0,...,31}uses only a single replicated S-box.
-For example, R0 uses S0, 32 copies of which are applied in parallel. Thus the first
-ˆ
-copy of S0 takes bits 0, 1, 2 and 3 of
-B0 ⊕ˆ
-K0 as its input and returns as output
-the first four bits of an intermediate vector; the next copy of S0 inputs bits 4–7 of
-ˆ
-B0 ⊕ˆ
-K0 and returns the next four bits of the intermediate vector, and so on. The
-intermediate vector is then transformed using the linear transformation, giving
-ˆ
-ˆ
-B1. Similarly, R1 uses 32 copies of S1 in parallel on
-B1 ⊕ˆ
-K1 and transforms
-ˆ
-their output using the linear transformation, giving
-B2.
-The set of eight S-boxes is used four times. Thus after using S7 in round 7,
-we use S0 again in round 8, then S1 in round 9, and so on. The last round R31
-ˆ
-is slightly diﬀerent from the others: we apply S7 on
-B31 ⊕ˆ
-K31, and XOR the
-ˆ
-ˆ
-result with
-K32 rather than applying the linear transformation. The result
-B32
-is then permuted by FP, giving the ciphertext.
+We use the following notation. The initial permutation IP is applied to the plaintext P giving B0, which is the input to the first round. The rounds are numbered from 0 to 31, where the first round is round 0 and the last is round 31.
+The output of the first round (round 0) is B1, the output of the second round (round 1) is B2, the output of round iis Bi+1, and so on, until the output of the last round (in which the linear transformation is replaced by an additional key mixing) is denoted by B32. The final permutation FP is now applied to give theciphertext C.
+Each round function Ri (i∈{0,...,31}uses only a single replicated S-box. For example, R0 uses S0, 32 copies of which are applied in parallel. Thus the first copy of S0 takes bits 0, 1, 2 and 3 of B0 ⊕K0 as its input and returns as outputthe first four bits of an intermediate vector; the next copy of S0 inputs bits 4–7 ofB0 ⊕K0 and returns the next four bits of the intermediate vector, and so on. The intermediate vector is then transformed using the linear transformation, giving B1. Similarly, R1 uses 32 copies of S1 in parallel on B1 ⊕K1 and transforms their output using the linear transformation, giving B2. The set of eight S-boxes is used four times. Thus after using S7 in round 7, we use S0 again in round 8, then S1 in round 9, and so on. The last round R31is slightly diﬀerent from the others: we apply S7 on B31 ⊕K31, and XOR the result with
+K32 rather than applying the linear transformation. The result B32 is then permuted by FP, giving the ciphertext.
 Thus the 32 rounds use 8 diﬀerent S-boxes each of which maps four input
 bits to four output bits. Each S-box is used in precisely four rounds, and in each
 of these it is used 32 times in parallel. The S-box design is discussed below.
 As with DES, the final permutation is the inverse of the initial permutation.
 Thus the cipher may be formally described by the following equations:
 where
-ˆ
+
 B0 := IP(P)
-ˆ
-ˆ
-Bi+1 := Ri(
-Bi)
-ˆ
-C := FP(
-B32)
-ˆ
-Ri(X) = L(
-Si(X⊕ˆ
-Ki)) i= 0,...,30
-ˆ
-Ri(X) =
-Si(X⊕ˆ
-Ki) ⊕ˆ
-K32 i= 31
-3
-ˆ
-where
-Si is the application of the S-box Simod 8 32 times in parallel, and L
+Bi+1 := Ri(Bi)
+C := FP(B32)
+Ri(X) = L(Si(X⊕ˆKi)) i= 0,...,30
+Ri(X) =Si(X⊕ˆKi) ⊕ˆK32 i= 31
+
+where Si is the application of the S-box Simod 8 32 times in parallel, and L
 is the linear transformation.
 Although each round of the proposed cipher might seem weaker than a round
 of DES, this is not the case. For example, the probability of the best six-round
@@ -151,7 +87,7 @@ swapentries (sbox[currentsbox][i],sbox[currentsbox][j]);
 if sbox[currentsbox][.] has the desired properties, save it;
 index := index + 1;
 until 8 S-boxes have been generated
-4
+
 In Serpent-0, we used the DES S-boxes in order to inspire a high level of public
 confidence that we had not inserted any trapdoor in them. A similar assurance
 for Serpent-1 comes from the fact that the S-boxes have been generated in this
@@ -210,12 +146,8 @@ X0 := X0 <<<5
 X2 := X2 <<<22
 Bi+1 := X0,X1,X2,X3
 where <<<denotes rotation, and <<denotes shift. In the last round, this linear
-transformation is replaced by an additional key mixing: B32 := S7(B31 ⊕K31)⊕
-ˆ
-ˆ
-K32. Note that at each stage IP(Bi) =
-Bi, and IP(Ki) =
-Ki.
+transformation is replaced by an additional key mixing: B32 := S7(B31 ⊕K31)⊕K32. Note that at each stage IP(Bi) =
+Bi, and IP(Ki) = Ki.
 The first reason for the choice of linear transformation is to maximize the
 avalanche eﬀect. The S-boxes have the property that a single input bit change
 will cause two output bits to change; as the diﬀerence sets of {0, 1, 3, 5, 7, 13,
@@ -235,7 +167,6 @@ bounds show that this choice suits our needs.
 As with the description of the cipher, we can describe the key schedule in either
 standard or bitslice mode. We will give the substantive description for the latter
 case.
-6
 Our cipher requires 132 32-bit words of key material. We first pad the user
 supplied key to 256 bits, if necessary, as described in section 2. We then expand
 it to 33 128-bit subkeys K0, . . . , K32, in the following way. We write the key K
@@ -263,6 +194,5 @@ r}) as follows:
 Ki := {k4i,k4i+1,k4i+2,k4i+3} (1)
 Where we are implementing the algorithm in the form initially described in
 section 2 above rather than using bitslice operations, we now apply IP to the
-ˆ
 round key in order to place the key bits in the correct column, i.e.,
 Ki = IP(Ki).
