@@ -1,7 +1,7 @@
 """Simple functions to encrypt and decrypt from the command line"""
 
 import argparse
-from pyaradi import aradi_core
+import aradi_core
 
 
 def _parse_args():

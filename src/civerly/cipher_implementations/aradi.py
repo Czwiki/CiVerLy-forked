@@ -74,7 +74,7 @@ class ARADI_CVL:
             basis = 1 << (31 - basis_index)
             rows.append(int_to_vec(cls._aradi_linear_word_eval(basis, a, b, c), 32))
         # LinearLayer_CVL expects a matrix where columns represent input bits.
-        return matrix(GF(2), rows)
+        return matrix(GF(2), rows).transpose()
 
     def __init__(self, R=16, rks=[], name=None):
         r"""
@@ -110,26 +110,26 @@ class ARADI_CVL:
             sage: # Round keys from the reference test vector
             sage: rks = [
             ....:   0x3020100070605040b0a09080f0e0d0c,
-            ....:   0xa5aeb3b8a69180b73d3e3b3827202126,
-            ....:   0x92af7845c5f82f12adfcc796feaf94c5,
-            ....:   0x39bf0583b7100baeeb4405aad5c2c9de,
-            ....:   0xdd16c60d9a673ec7b25203e3c063f85b,
-            ....:   0xf280e298478b8a40130fc1d51cb7f55c,
-            ....:   0x9715fc36e990e2df822df6d12dd585f1,
-            ....:   0x844355d2fc88a846674e4f666643af96,
-            ....:   0x7a4c8e1c5f48abcb9c5e6e438665875c,
-            ....:   0x90a43ad19a5ba4c66436454d2ada7613,
-            ....:   0x7e5e81772132a5d0c93e9abc0699074c,
-            ....:   0xdf2b7d7897e250f783b52c86d1b5648f,
-            ....:   0xd7f61c3e09b437512ffd158c814761ed,
-            ....:   0x4c1714b2b19b1e614057ae77a458f4ff,
-            ....:   0x65d837954f998de3754a88f785bb2bd8,
-            ....:   0x78b9a112e313cc0e2eefc24c5a10a33,
-            ....:   0x9ded35d867b53319ff366690eed4746d,
+            ....:   0x313237342b2c2d2a89829f94eaddccfb,
+            ....:   0x1918131249484342bfb2b5b8efe2e5e8,
+            ....:   0x93d8dd9649bbf10212918d0e2caf0292,
+            ....:   0x7c795e5b6e0a4a2f708952ab0fb51eb7,
+            ....:   0x73be37f3b12de15c6d10261a63fa1fb1,
+            ....:   0x30e1a56556518eba38a4dc7043b62b6b,
+            ....:   0x6ff94bf4a1525d49960d690af40ac5e6,
+            ....:   0x652b43fa7ea0caa18356eca6eed8d0ca,
+            ....:   0x1e8816b8eaf40402bf1911dbd2ed83c3,
+            ....:   0x2aed0767d7e429720ddcac43e0ce34bd,
+            ....:   0xe587db6fd93a728ee7a7904354e47c4c,
+            ....:   0x5deafddf1235c451b94205971bc4fb83,
+            ....:   0xf95881fca9cbae8e266a00c264230546,
+            ....:   0xcc0fab2e5b7aad7732495539b022810a,
+            ....:   0x71c5c0468ab9aa02d8fb0856b7dfa119,
+            ....:   0xa443053b69322a8ee8abfb4f41cf0ca8,
             ....: ]
             sage: aradi = ARADI_CVL(rks=rks)
             sage: hex(vec_to_int(aradi(int_to_vec(0x0, 128))))
-            '0xa52604bc87564e804d7a319f0a404aee'
+            '0x3f09abf400e3bd7403260defb7c53912'
         """
         if name is None:
             name = "ARADI"
@@ -154,48 +154,53 @@ class ARADI_CVL:
                 [(node, (word_index, bit_index + 32 * word_index)) for word_index in range(4)]
             )
 
-        a_values = [11, 10, 9, 8]
-        b_values = [8, 9, 4, 9]
-        c_values = [14, 11, 14, 7]
+        linear_layers = []
+        for round_index in range(4):
+            a_values = [11, 10, 9, 8]
+            b_values = [8, 9, 4, 9]
+            c_values = [14, 11, 14, 7]
 
-        linear_layer = SBoxCipher(128, 128, name="LinearLayer")
-        for word_index in range(4):
-            # Build one 32-bit linear transformation per state word.
+            linear_layer = SBoxCipher(128, 128, name=f"LinearLayer{round_index}")
             word_matrix = self._aradi_linear_word_matrix(
-                a_values[word_index],
-                b_values[word_index],
-                c_values[word_index],
+                a_values[round_index],
+                b_values[round_index],
+                c_values[round_index],
             )
             word_component = LinearLayer_CVL(
                 word_matrix,
-                name=f"L{word_index}"
+                name=f"L{round_index}"
             )
-            # Wire the word component so its input and output bit positions
-            # stay aligned with the surrounding 128-bit state layout.
-            node = linear_layer.add_subcipher(
-                word_component,
-                [(linear_layer.IN, (32 * word_index + bit_index, bit_index)) for bit_index in range(32)]
-            )
-            linear_layer.add_output(
-                [(node, (bit_index, 32 * word_index + bit_index)) for bit_index in range(32)]
-            )
+            for word_index in range(4):
+                # Each round uses the same 32-bit linear transform on every word.
+                node = linear_layer.add_subcipher(
+                    word_component,
+                    [(linear_layer.IN, (32 * word_index + bit_index, bit_index)) for bit_index in range(32)]
+                )
+                linear_layer.add_output(
+                    [(node, (bit_index, 32 * word_index + bit_index)) for bit_index in range(32)]
+                )
+            linear_layers.append(linear_layer)
 
-        # One ARADI round is: add round key -> S-box layer -> linear layer.
-        round_cipher = SBoxCipher(128, 128, name="ARADI-round")
-        rk = RoundkeyXOR_CVL(128, 0, name="RK")
-        node_rk = round_cipher.add_subcipher(
-            rk, [(round_cipher.IN, (bit_index, bit_index)) for bit_index in range(128)]
-        )
-        node_sbox = round_cipher.add_subcipher(
-            sbox_layer, [(node_rk, (bit_index, bit_index)) for bit_index in range(128)]
-        )
-        node_linear = round_cipher.add_subcipher(
-            linear_layer, [(node_sbox, (bit_index, bit_index)) for bit_index in range(128)]
-        )
-        round_cipher.add_output([(node_linear, (bit_index, bit_index)) for bit_index in range(128)])
+        # One ARADI round is: add round key -> S-box layer -> round-dependent linear layer.
+        round_ciphers = []
+        for round_index in range(4):
+            round_cipher = SBoxCipher(128, 128, name=f"ARADI-round{round_index}")
+            rk = RoundkeyXOR_CVL(128, 0, name="RK")
+            node_rk = round_cipher.add_subcipher(
+                rk, [(round_cipher.IN, (bit_index, bit_index)) for bit_index in range(128)]
+            )
+            node_sbox = round_cipher.add_subcipher(
+                sbox_layer, [(node_rk, (bit_index, bit_index)) for bit_index in range(128)]
+            )
+            node_linear = round_cipher.add_subcipher(
+                linear_layers[round_index], [(node_sbox, (bit_index, bit_index)) for bit_index in range(128)]
+            )
+            round_cipher.add_output([(node_linear, (bit_index, bit_index)) for bit_index in range(128)])
+            round_ciphers.append(round_cipher)
 
         node = cipher.IN
         for round_index in range(R):
+            round_cipher = round_ciphers[round_index % 4]
             # The round key component is reused; only its constant changes.
             round_cipher.nodes[1].const = rks[round_index]
             node = cipher.add_subcipher(

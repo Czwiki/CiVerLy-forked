@@ -1,6 +1,6 @@
 """Core ARADI functions, such as sbox, linear map, keyschedule and basic encryption and decryption blocks"""
 
-from pyaradi import aradi_utils
+import aradi_utils
 
 
 def sbox(w, x, y, z):

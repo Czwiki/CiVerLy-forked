@@ -1,6 +1,6 @@
 """Simple auxiliary and bit manipulation functions for aradi encryption"""
 
-from Crypto import Random
+#from cryptography import Random
 
 
 def rotate(val, rot, bits):

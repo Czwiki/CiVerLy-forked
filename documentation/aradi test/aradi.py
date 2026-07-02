@@ -1,5 +1,5 @@
-from pyaradi import aradi_core
-from pyaradi import aradi_utils
+import aradi_core
+import aradi_utils
 import struct
 
 
