@@ -5,16 +5,19 @@ Serpent is a 32-round SP-network operating on four 32-bit words,
 giving a block size of 128 bits. It uses 8 different 4-bit S-boxes
 applied in parallel 32 times per round.
 
+The implementation follows the standard Serpent description from the
+original specification, including the initial permutation (IP) and
+final permutation (FP).
+
 EXAMPLES::
 
     sage: from civerly.cipher_implementations.serpent import SERPENT_CVL
     sage: from civerly.util import int_to_vec, vec_to_int
-    sage: # With zero round keys and zero plaintext, the cipher is not zero
-    sage: # due to non-trivial S-box outputs
-    sage: serpent = SERPENT_CVL(R=1)
-    sage: result = serpent(int_to_vec(0x0, 128))
-    sage: vec_to_int(result) > 0
-    True
+    sage: serpent = SERPENT_CVL(key=0, keylen=128)
+    sage: pt = int('8ED77392F29990EDA7A3A3CE6F579DD2', 16)
+    sage: ct = vec_to_int(serpent(int_to_vec(pt, 128)))
+    sage: hex(ct)
+    '0x2d99fd0696ced14886b0e88a968b28b2'
 
 """
 
@@ -23,12 +26,42 @@ from sage.rings.finite_rings.finite_field_constructor import GF
 from sage.matrix.constructor import Matrix as matrix
 
 from civerly.sboxcipher import SBoxCipher
-from civerly.component import SBox_CVL, LinearLayer_CVL, RoundkeyXOR_CVL
+from civerly.component import (
+    SBox_CVL, LinearLayer_CVL, RoundkeyXOR_CVL, PermuteLayer_CVL
+)
 
 
 PHI = 0x9e3779b9
 
+# ---------------------------------------------------------------------------
+# IP / FP tables from the Serpent specification
+# ---------------------------------------------------------------------------
+IP_TABLE = [
+    0, 32, 64, 96, 1, 33, 65, 97, 2, 34, 66, 98, 3, 35, 67, 99,
+    4, 36, 68, 100, 5, 37, 69, 101, 6, 38, 70, 102, 7, 39, 71, 103,
+    8, 40, 72, 104, 9, 41, 73, 105, 10, 42, 74, 106, 11, 43, 75, 107,
+    12, 44, 76, 108, 13, 45, 77, 109, 14, 46, 78, 110, 15, 47, 79, 111,
+    16, 48, 80, 112, 17, 49, 81, 113, 18, 50, 82, 114, 19, 51, 83, 115,
+    20, 52, 84, 116, 21, 53, 85, 117, 22, 54, 86, 118, 23, 55, 87, 119,
+    24, 56, 88, 120, 25, 57, 89, 121, 26, 58, 90, 122, 27, 59, 91, 123,
+    28, 60, 92, 124, 29, 61, 93, 125, 30, 62, 94, 126, 31, 63, 95, 127
+]
 
+FP_TABLE = [
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60,
+    64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124,
+    1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61,
+    65, 69, 73, 77, 81, 85, 89, 93, 97, 101, 105, 109, 113, 117, 121, 125,
+    2, 6, 10, 14, 18, 22, 26, 30, 34, 38, 42, 46, 50, 54, 58, 62,
+    66, 70, 74, 78, 82, 86, 90, 94, 98, 102, 106, 110, 114, 118, 122, 126,
+    3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63,
+    67, 71, 75, 79, 83, 87, 91, 95, 99, 103, 107, 111, 115, 119, 123, 127
+]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def _rotl32(x, n):
     r"""
     Rotate left a 32-bit word ``x`` by ``n`` bits.
@@ -46,24 +79,22 @@ def _rotl32(x, n):
     return ((x << n) | (x >> (32 - n))) & 0xffffffff
 
 
-def _bit_reverse32(x):
+def _apply_perm_int(x, perm):
     r"""
-    Reverse the bits within a 32-bit word.
+    Apply a permutation ``perm`` to the 128-bit integer ``x``.
 
-    INPUT:
-
-        - ``x`` -- integer; A 32-bit word.
-
-    OUTPUT: The bit-reversed 32-bit word.
+    Returns a new integer where bit ``p`` is ``x[perm[p]]``.
     """
-    x = int(x) & 0xffffffff
-    res = 0
-    for i in range(32):
-        if (x >> i) & 1:
-            res |= 1 << (31 - i)
-    return res
+    result = 0
+    for p in range(128):
+        if (x >> perm[p]) & 1:
+            result |= 1 << p
+    return result
 
 
+# ---------------------------------------------------------------------------
+# Key schedule
+# ---------------------------------------------------------------------------
 def serpent_key_schedule(key, keylen=128, R=32):
     r"""
     Generate round keys for the Serpent block cipher.
@@ -71,6 +102,9 @@ def serpent_key_schedule(key, keylen=128, R=32):
     Serpent requires 33 128-bit subkeys. The user key is first padded to
     256 bits if necessary, then expanded to 132 prekey words via an affine
     recurrence, and finally transformed by the S-boxes in bitslice mode.
+    After the bitslice round key words are produced, the initial
+    permutation (IP) is applied to each round key to obtain the
+    standard-mode subkeys ``KHat``.
 
     The round keys are returned as 128-bit integers, compatible with the
     ``rks`` parameter of :class:`SERPENT_CVL`.
@@ -94,19 +128,19 @@ def serpent_key_schedule(key, keylen=128, R=32):
         sage: len(rks)
         33
         sage: hex(rks[0])
-        '0x49ceeb71b709994f73c5c5e54bb9eaf6'
+        '0xe5749bf3e92d49bf78ad11abf74966b4'
         sage: hex(rks[1])
-        '0xf985cb82ebc3c40612b2643770da4801'
+        '0x3e602208886902fcc781325fc60cbddc'
         sage: hex(rks[2])
-        '0x6443104a3c5603b7a39467a12657931f'
+        '0x7d595686772092219d7070d223d44f82'
 
         sage: rks = serpent_key_schedule(0, keylen=256)
         sage: hex(rks[0])
-        '0x9ceeb71b7199b4f73c5c7e50ba9eaf6'
+        '0xe5749bf3ef2d49bf78ad41abf7496624'
         sage: hex(rks[1])
-        '0x9995c8828bd7c50652aa673750ce4901'
+        '0x3e602208726902fcc7d3c25fc60cb03c'
         sage: hex(rks[2])
-        '0x544b108a3c5402f7c39267611653925f'
+        '0x7d59567c272092219b4870d223d4d4a2'
 
     TESTS::
 
@@ -116,11 +150,11 @@ def serpent_key_schedule(key, keylen=128, R=32):
             sage: key = int("80000000000000000000000000000000", 16)
             sage: rks = serpent_key_schedule(key, keylen=128)
             sage: hex(rks[0])
-            '0xc9deeb71b719994ff3d5c1e54b99eaf6'
+            '0xe5749bf3e90d49bf78adf0abf74966be'
             sage: hex(rks[1])
-            '0xb98dcd826bd3c10652ba6437f0da4b01'
+            '0x3e602208d1a902fcc78b725fc60cbd79'
             sage: hex(rks[2])
-            '0xb457144a4c4a0637738c6621a65f929f'
+            '0x7d59568107e092219db790d223d4ab69'
     """
     if keylen > 256:
         raise ValueError("Key length must be at most 256 bits")
@@ -132,24 +166,22 @@ def serpent_key_schedule(key, keylen=128, R=32):
     else:
         key = int(key)
 
-    # Serpent uses a little-endian word order for the key schedule.
-    # Split 256 key bits into 8 words.
-    w_init = []
-    for i in range(8):
-        w_init.append((key >> (32 * i)) & 0xffffffff)
+    # Split 256 key bits into 8 little-endian words.
+    w_init = [(key >> (32 * i)) & 0xffffffff for i in range(8)]
 
     # Prekey expansion: w[i] for i = -8 .. 131
-    # Using raw_w[0..139] where raw_w[i] corresponds to w[i-8]
     raw_w = w_init + [0] * 132
     for i in range(132):
-        raw_w[i + 8] = _rotl32(raw_w[i] ^ raw_w[i + 3] ^ raw_w[i + 5] ^ raw_w[i + 7] ^ PHI ^ i, 11)
+        raw_w[i + 8] = _rotl32(
+            raw_w[i] ^ raw_w[i + 3] ^ raw_w[i + 5] ^ raw_w[i + 7] ^ PHI ^ i,
+            11
+        )
 
     w = raw_w[8:140]
 
     # Apply bitslice S-boxes to prekeys to obtain 132 round-key words.
     # S-box sequence for each group of 4 prekey words:
-    # i=0: S3, i=1: S2, i=2: S1, i=3: S0, i=4: S7, i=5: S6, i=6: S5, i=7: S4, ...
-    # (whichS = (32 + 3 - i) % 32, accessed modulo 8)
+    # i=0: S3, i=1: S2, i=2: S1, i=3: S0, i=4: S7, ...
     k = [0] * 132
     for i in range(33):
         whichS = (32 + 3 - i) % 32
@@ -164,29 +196,25 @@ def serpent_key_schedule(key, keylen=128, R=32):
                 bit = (output >> l) & 1
                 k[4 * i + l] |= bit << j
 
-    # Pack 4 words into a 128-bit integer compatible with CiVerLy's
-    # ``int_to_vec`` convention. Positions 0..31 of the 128-bit vector
-    # correspond to integer bit 127 down to 96. The S-box layer treats
-    # vector positions j, j+32, j+64, j+96 as the four input bits
-    # for the j-th parallel S-box.
+    # Pack the 4 words into a 128-bit bitslice integer and apply IP to get
+    # the standard-mode round key KHat.
     rks = []
     for i in range(R + 1):
-        w0 = k[4 * i]
-        w1 = k[4 * i + 1]
-        w2 = k[4 * i + 2]
-        w3 = k[4 * i + 3]
-        subkey = (
-            (_bit_reverse32(w3) << 96)
-            | (_bit_reverse32(w2) << 64)
-            | (_bit_reverse32(w1) << 32)
-            | _bit_reverse32(w0)
+        packed_bitslice = (
+            (k[4 * i + 3] << 96)
+            | (k[4 * i + 2] << 64)
+            | (k[4 * i + 1] << 32)
+            | k[4 * i]
         )
-        rks.append(subkey)
+        KHat = _apply_perm_int(packed_bitslice, IP_TABLE)
+        rks.append(KHat)
 
     return rks
 
 
-# S-boxes definition from the Serpent specification
+# ---------------------------------------------------------------------------
+# S-boxes
+# ---------------------------------------------------------------------------
 SERPENT_SBOXES = [
     SBox_sage([3, 8, 15, 1, 10, 6, 5, 11, 14, 13, 4, 2, 7, 0, 9, 12]),   # S0
     SBox_sage([15, 12, 2, 7, 9, 0, 5, 10, 1, 11, 14, 8, 6, 13, 3, 4]),  # S1
@@ -199,12 +227,16 @@ SERPENT_SBOXES = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Linear layer
+# ---------------------------------------------------------------------------
 def _build_serpent_linear_layer():
     r"""
     Build the LinearLayer_CVL for Serpent's linear transformation.
 
     The linear transformation is defined by the LTTable in the reference
-    implementation. This function constructs the corresponding binary matrix.
+    implementation. This function constructs the corresponding binary matrix
+    in the orientation required by :class:`LinearLayer_CVL`.
 
     TESTS::
 
@@ -214,8 +246,6 @@ def _build_serpent_linear_layer():
         LT
 
     """
-    # LT table from serpent-tables.h (128 rows, each with input bit indices)
-    # Output bit i = XOR of input bits in LT_TABLE[i]
     LT_TABLE = [
         [16, 52, 56, 70, 83, 94, 105],
         [72, 114, 125],
@@ -333,7 +363,6 @@ def _build_serpent_linear_layer():
         [56, 98, 109],
         [14, 60, 114, 127],
         [20, 74, 87],
-        # Missing entries (116-127) added to complete LT table
         [4, 40, 44, 58, 71, 82, 93],
         [60, 102, 113],
         [3, 18, 72, 114, 118, 125],
@@ -348,15 +377,17 @@ def _build_serpent_linear_layer():
         [32, 86, 99],
     ]
 
-    # Build binary matrix: output bit i is XOR of input bits from LT_TABLE[i]
-    m = [[0 for _ in range(128)] for _ in range(128)]
-    for i, inputs in enumerate(LT_TABLE):
-        for j in inputs:
-            m[i][j] = 1
+    arr = [[0] * 128 for _ in range(128)]
+    for i in range(128):
+        for j in LT_TABLE[i]:
+            arr[127 - i][127 - j] = 1
 
-    return LinearLayer_CVL(matrix(GF(2), m), name="LT")
+    return LinearLayer_CVL(matrix(GF(2), arr), name="LT")
 
 
+# ---------------------------------------------------------------------------
+# Main cipher class
+# ---------------------------------------------------------------------------
 class SERPENT_CVL:
     r"""
     The CiVerLy implementation of the Serpent block cipher.
@@ -364,21 +395,18 @@ class SERPENT_CVL:
     Serpent is a 32-round SP-network operating on four 32-bit words,
     giving a block size of 128 bits. The cipher consists of:
 
-    - An initial permutation (IP) - skipped for simplicity (identity)
+    - An initial permutation (IP)
     - 32 rounds, each applying: key mixing XOR, S-box layer, linear
-      transformation (except last round which uses an extra key XOR instead)
-    - A final permutation (FP) - skipped for simplicity (identity)
-
-    Note: The IP/FP permutations are omitted in this implementation as they
-    only serve to convert between bitslice and traditional representations.
-    For cryptanalysis, they can be included as PermuteLayer_CVL if needed.
+      transformation (except the last round, which replaces LT by an
+      additional key XOR)
+    - A final permutation (FP)
 
     INPUT::
 
         - ``R`` -- integer; Number of rounds (default: 32).
 
         - ``rks`` -- list (optional); Specifies the round key values.
-          Must have length R+1 (33 keys for full-round Serpent).
+          Must have length ``R+1`` (33 keys for full-round Serpent).
           Defaults to all zeros.
 
         - ``key`` -- integer (optional); A master key from which round keys
@@ -391,14 +419,21 @@ class SERPENT_CVL:
 
     EXAMPLES::
 
-        Verify basic encryption functionality::
+        Verify encryption with the NESSIE test vectors (KEYSIZE=128,
+        KEY=0) from ``ecb_tbl_precomputed.txt``::
 
             sage: from civerly.cipher_implementations.serpent import SERPENT_CVL
             sage: from civerly.util import int_to_vec, vec_to_int
-            sage: serpent = SERPENT_CVL(R=1)
-            sage: result = serpent(int_to_vec(0x0, 128))
-            sage: vec_to_int(result) > 0  # S-box output is non-zero even for zero input
-            True
+            sage: serpent = SERPENT_CVL(key=0, keylen=128)
+            sage: pt1 = int('8ED77392F29990EDA7A3A3CE6F579DD2', 16)
+            sage: hex(vec_to_int(serpent(int_to_vec(pt1, 128))))
+            '0x2d99fd0696ced14886b0e88a968b28b2'
+            sage: pt2 = int('8ED77392F29990EDA7A3A3CE90A8622D', 16)
+            sage: hex(vec_to_int(serpent(int_to_vec(pt2, 128))))
+            '0x2d118710a9ac549d932e1ab82eb07e71'
+            sage: pt3 = int('8ED773920D666F12A7A3A3CE6F579DD2', 16)
+            sage: hex(vec_to_int(serpent(int_to_vec(pt3, 128))))
+            '0x18e7f7888133888b42b78653501bba41'
 
         Instantiate with a master key (round keys are derived automatically)::
 
@@ -438,50 +473,66 @@ class SERPENT_CVL:
             else:
                 rks = [0 for _ in range(R + 1)]
 
-        # Build linear layer (same for all rounds except last)
         lt = _build_serpent_linear_layer()
 
-        # Build S-box layer: 32 parallel 4-bit S-boxes (for a specific S-box index)
-        # Uses bitslice representation where S-box j takes bits j, j+32, j+64, j+96
         def make_sboxlayer(sbox_idx):
             sboxlayer = SBoxCipher(128, 128, name=f"SBoxLayer_{sbox_idx}")
-            sbox = SBox_CVL(SERPENT_SBOXES[sbox_idx], name=f"S{sbox_idx}")
             output_edges = []
-            for j in range(32):
-                # Each S-box processes 4 bits at positions j, j+32, j+64, j+96
-                # Input: bits (j, j+32, j+64, j+96) -> S-box input bits (0, 1, 2, 3)
-                # Output: S-box output bits (0, 1, 2, 3) -> bits (j, j+32, j+64, j+96)
-                node = sboxlayer.add_subcipher(sbox, [(sboxlayer.IN, (j + 32*i, i)) for i in range(4)])
-                output_edges.extend([(node, (i, j + 32*i)) for i in range(4)])
+            for n in range(32):
+                in_pos = [127 - (4 * n + k) for k in range(4)]
+                sbox = SBox_CVL(
+                    SERPENT_SBOXES[sbox_idx], name=f"S{sbox_idx}_{n}"
+                )
+                node = sboxlayer.add_subcipher(
+                    sbox,
+                    [(sboxlayer.IN, (in_pos[3 - k], k)) for k in range(4)]
+                )
+                output_edges.extend(
+                    [(node, (k, in_pos[3 - k])) for k in range(4)]
+                )
             sboxlayer.add_output(output_edges)
             return sboxlayer
 
-        # Build S-box layers for each round (round i uses S_i mod 8)
-        sboxlayers = [make_sboxlayer(r % 8) for r in range(R)]
-
-        # Key addition component
-        key_add = RoundkeyXOR_CVL(128, 0x0, name="KeyAdd")
-
-        # Build the full cipher
         cipher = SBoxCipher(128, 128, name=name)
 
-        node = cipher.IN
+        # Initial permutation: standard -> standard-permuted (bitslice)
+        ip = PermuteLayer_CVL(FP_TABLE, name="IP")
+        current = cipher.add_subcipher(
+            ip, [(cipher.IN, (i, i)) for i in range(128)]
+        )
+
         for r in range(R):
-            # Key addition before S-box
-            key_add.const = rks[r]
-            node_key = cipher.add_subcipher(key_add, [(node, (i, i)) for i in range(128)])
+            # Key addition
+            key_add = RoundkeyXOR_CVL(128, rks[r], name=f"K{r}")
+            current = cipher.add_subcipher(
+                key_add, [(current, (i, i)) for i in range(128)]
+            )
 
             # S-box layer
-            node_sbox = cipher.add_subcipher(sboxlayers[r], [(node_key, (i, i)) for i in range(128)])
+            sboxlayer = make_sboxlayer(r % 8)
+            current = cipher.add_subcipher(
+                sboxlayer, [(current, (i, i)) for i in range(128)]
+            )
 
             if r == R - 1:
-                # Last round: skip LT, apply final key XOR
-                key_add.const = rks[R]
-                node_key = cipher.add_subcipher(key_add, [(node_sbox, (i, i)) for i in range(128)])
-                cipher.add_output([(node_key, (i, i)) for i in range(128)])
+                # Last round: final key XOR instead of LT
+                key_final = RoundkeyXOR_CVL(128, rks[R], name=f"K{R}")
+                current = cipher.add_subcipher(
+                    key_final, [(current, (i, i)) for i in range(128)]
+                )
             else:
                 # Linear transformation
-                node = cipher.add_subcipher(lt, [(node_sbox, (i, i)) for i in range(128)])
+                current = cipher.add_subcipher(
+                    lt, [(current, (i, i)) for i in range(128)]
+                )
+
+        # Final permutation: standard-permuted -> standard
+        fp = PermuteLayer_CVL(IP_TABLE, name="FP")
+        current = cipher.add_subcipher(
+            fp, [(current, (i, i)) for i in range(128)]
+        )
+
+        cipher.add_output([(current, (i, i)) for i in range(128)])
 
         self.cipher = cipher
 
