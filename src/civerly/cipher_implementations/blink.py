@@ -167,7 +167,7 @@ def blink_round_constants_64():
         sage: hex(rc[0])
         '0x13198a2e03707344'
         sage: hex(rc_prime[0])
-        '0xd71577c1bd314b27'
+        '0x0d95748f728eb658'
     """
     rc = [
         0x13198a2e03707344,
@@ -177,11 +177,11 @@ def blink_round_constants_64():
         0xd1310ba698dfb5ac,
     ]
     rc_prime = [
-        0xd71577c1bd314b27,
-        0x8e79dcb0603a180e,
-        0xc5d1b023286085f0,
-        0x7b54a41dc25a59b5,
         0x0d95748f728eb658,
+        0x7b54a41dc25a59b5,
+        0xc5d1b023286085f0,
+        0x8e79dcb0603a180e,
+        0xd71577c1bd314b27,
     ]
     return rc, rc_prime
 
@@ -205,27 +205,27 @@ def blink_round_constants_128():
         sage: len(rc), len(rc_prime)
         (8, 8)
         sage: hex(rc[0])
-        '0xed33b83d137b6e8c1fccdd90f09a7efc'
+        '0x243f6a8885a308d313198a2e03707344'
     """
     rc = [
-        0xed33b83d137b6e8c1fccdd90f09a7efc,
-        0x1059b6a5600dde58a728a267dc0b2b5d,
-        0x8bf37fa68a590051bb7feb3f0b07640a,
-        0x13983d6dc133c57b5a3109f7c0c42df1,
-        0xb9f0c0c48798e4b620d916e380724a8b,
-        0xe4ae954e52db9b008913103695722f92,
-        0x31d26b73a758f4e2f21d6dd6e838acf3,
-        0x6f0a116499d719efa34c2a9bf67f2880,
+        0x243f6a8885a308d313198a2e03707344,
+        0xa4093822299f31d0082efa98ec4e6c89,
+        0x452821e638d01377be5466cf34e90c6c,
+        0xc0ac29b7c97c50dd3f84d5b5b5470917,
+        0x9216d5d98979fb1bd1310ba698dfb5ac,
+        0x2ffd72dbd01adfb7b8e1afed6a267e96,
+        0xba7c9045f12c7f9924a19947b3916cf7,
+        0x0801f2e2858efc16636920d871574e69,
     ]
     rc_prime = [
-        0x6f0a116499d719efa34c2a9bf67f2880,
-        0x31d26b73a758f4e2f21d6dd6e838acf3,
-        0xe4ae954e52db9b008913103695722f92,
-        0xb9f0c0c48798e4b620d916e380724a8b,
-        0x13983d6dc133c57b5a3109f7c0c42df1,
-        0x8bf37fa68a590051bb7feb3f0b07640a,
-        0x1059b6a5600dde58a728a267dc0b2b5d,
-        0xed33b83d137b6e8c1fccdd90f09a7efc,
+        0xa458fea3f4933d7e0d95748f728eb658,
+        0x718bcd5882154aee7b54a41dc25a59b5,
+        0x9c30d5392af26013c5d1b023286085f0,
+        0xca417918b8db38ef8e79dcb0603a180e,
+        0x6c9e0e8bb01e8a3ed71577c1bd314b27,
+        0x78af2fda55605c60e65525f3aa55ab94,
+        0x5748986263e8144055ca396a2aab10b6,
+        0xb4cc5c341141e8cea15486af7c72e993,
     ]
     return rc, rc_prime
 
@@ -274,7 +274,7 @@ def blink_key_schedule(k, n, a, b):
     Parse a master key into the format used by the Blink THF mode.
 
     The master key of length ``(a + b + 2) * n`` bits is divided into
-    ``a + b`` round keys ``rk_{a+b} || ... || rk_1`` and two whitening
+    ``a + b`` round keys ``rk_1 || ... || rk_{a+b}`` and two whitening
     keys ``w2 || w1`` (with ``w1`` as the least-significant `n` bits).
     The rearranged key ``k'`` is also derived, from which the Toeplitz
     hash keys ``k2`` and ``k1`` are taken.
@@ -292,10 +292,9 @@ def blink_key_schedule(k, n, a, b):
     OUTPUT:
 
     A 5-tuple ``(rk, w1, w2, k1, k2)`` where ``rk`` is a list of round
-    keys ``[rk_{a+b}, ..., rk_1]`` (MSB first, matching the order
-    expected by `BLINK64_CVL` / `BLINK128_CVL`), ``w1`` and ``w2`` are
-    whitening keys, and ``k1``, ``k2`` are the hash keys for the
-    Toeplitz hash.
+    keys ``[rk_1, ..., rk_{a+b}]`` (least-significant block first),
+    ``w1`` and ``w2`` are whitening keys, and ``k1``, ``k2`` are the
+    hash keys for the Toeplitz hash.
 
     EXAMPLES::
 
@@ -303,39 +302,105 @@ def blink_key_schedule(k, n, a, b):
         sage: k = 0x00050004000300020001  # 5*16=80 bits, n=16, a=2, b=1
         sage: rk, w1, w2, k1, k2 = blink_key_schedule(k, 16, 2, 1)
         sage: [hex(x) for x in rk]
-        ['0x5', '0x4', '0x3']
+        ['0x3', '0x4', '0x5']
         sage: hex(w1)
         '0x1'
         sage: hex(w2)
         '0x2'
     """
     total_bits = (a + b + 2) * n
+    key_bytes = total_bits // 8
+    state_bytes = n // 8
+    tweak_bytes = n // 8
+    hk_len = state_bytes + tweak_bytes
+
+    # Convert master key to little-endian byte list
+    master_key = [(k >> (8 * i)) & 0xFF for i in range(key_bytes)]
+
     w1 = k & ((1 << n) - 1)
     w2 = (k >> n) & ((1 << n) - 1)
+
     rks = []
     for i in range(a + b):
         rk_val = (k >> (2 * n + i * n)) & ((1 << n) - 1)
         rks.append(rk_val)
-    rks = rks[::-1]  # now [rk_1, ..., rk_{a+b}]
 
-    k_prime = blink_k_prime(k, total_bits)
-    tau = n
-    k1_len = n + tau - 1
-    k2_len = n + tau - 1
-    k1 = k_prime & ((1 << k1_len) - 1)
-    k2 = (k_prime >> k1_len) & ((1 << k2_len) - 1)
+    # Derive k' (bit permutation)
+    k_prime = [0] * key_bytes
+    for i in range(key_bytes):
+        for j in range(8):
+            bit_index = (11 * (8 * i + j)) % total_bits
+            byte_idx = bit_index // 8
+            bit_in_byte = bit_index % 8
+            bit_val = (master_key[byte_idx] >> bit_in_byte) & 1
+            k_prime[i] ^= (bit_val << j)
+            k_prime[i] &= 0xFF
+
+    # Derive hash keys (byte-level shift, matching the reference)
+    hk0 = [0] * hk_len
+    hk1 = [0] * hk_len
+    for i in range(hk_len - 1, -1, -1):
+        if i > 0:
+            hk0[i] = ((k_prime[i] << 1) ^ (k_prime[i - 1] >> 7)) & 0xFF
+            val = (k_prime[i + hk_len] << 2) & 0xFF
+            val2 = (k_prime[i + hk_len - 1] >> 6) & 0xFF
+            hk1[i] = (val ^ val2) & 0xFF
+        else:
+            hk0[i] = (k_prime[i] << 1) & 0xFF
+            val = (k_prime[i + hk_len] << 2) & 0xFF
+            val2 = (k_prime[i + hk_len - 1] >> 6) & 0xFF
+            hk1[i] = ((val ^ val2) & 0xFE) & 0xFF
+
+    k1 = sum(hk0[i] << (8 * i) for i in range(hk_len))
+    k2 = sum(hk1[i] << (8 * i) for i in range(hk_len))
 
     return rks, w1, w2, k1, k2
+
+
+# HW2 parity table used by the byte-level Toeplitz hash
+_HW2 = [
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+]
+
+# MixColumn matrix (nibble-level, same as Midori)
+_M_MATRIX = [
+    [0, 1, 1, 1],
+    [1, 0, 1, 1],
+    [1, 1, 0, 1],
+    [1, 1, 1, 0],
+]
+
+
+def _int_to_bytes(val, num_bytes):
+    """Convert an integer to a little-endian byte list."""
+    return [(val >> (8 * i)) & 0xFF for i in range(num_bytes)]
+
+
+def _bytes_to_int(byte_list):
+    """Convert a little-endian byte list to an integer."""
+    return sum((byte_list[i] & 0xFF) << (8 * i) for i in range(len(byte_list)))
 
 
 def blink_toeplitz_hash(k_hash, t, n, tau):
     r"""
     Toeplitz hash function used in the Blink THF mode.
 
-    The hash of a :math:`\tau`-bit tweak :math:`t` under a hash key
-    :math:`k_{\text{hash}}` is defined by a binary Toeplitz matrix
-    :math:`T \in \{0,1\}^{n \times \tau}` whose entries are taken
-    from the hash key.
+    This implementation follows the byte-level reference algorithm.
 
     INPUT:
 
@@ -358,17 +423,32 @@ def blink_toeplitz_hash(k_hash, t, n, tau):
         sage: bin(h)
         '0b10'
     """
-    result = 0
-    mask_n = (1 << n) - 1
-    for j in range(tau):
-        if (t >> j) & 1:
-            result = int(result) ^ int((k_hash >> j) & mask_n)
-    return result
+    state_bytes = n // 8
+    tweak_bytes = tau // 8
+    hk_len = state_bytes + tweak_bytes
+    k_hash_bytes = _int_to_bytes(k_hash, hk_len)
+    t_bytes = _int_to_bytes(t, tweak_bytes)
+    h = [0] * state_bytes
+    for i in range(state_bytes - 1, -1, -1):
+        h[state_bytes - 1 - i] = 0
+        for l in range(8):
+            temp = [0] * tweak_bytes
+            for j in range(tweak_bytes):
+                left = (k_hash_bytes[tweak_bytes + i - j] << l) & 0xFF
+                right = (k_hash_bytes[tweak_bytes + i - j - 1] >> (8 - l)) & 0xFF
+                temp[tweak_bytes - 1 - j] = left ^ right
+            p = 0
+            for j in range(tweak_bytes):
+                p ^= (t_bytes[j] & temp[j])
+                p &= 0xFF
+            h[state_bytes - 1 - i] ^= (_HW2[p] << l)
+            h[state_bytes - 1 - i] &= 0xFF
+    return _bytes_to_int(h)
 
 
 class THF_Blink_Encryptor:
     r"""
-    Standalone encryptor for the Blink THF mode.
+    Standalone encryptor/decryptor for the Blink THF mode.
 
     This class implements the full THF construction from the Blink
     paper (Section 5), including the key schedule, Toeplitz tweak
@@ -379,20 +459,10 @@ class THF_Blink_Encryptor:
     `BLINK64_CVL` / `BLINK128_CVL`, but the high-level THF mode is
     *not* integrated into those CiVerLy cipher objects.
 
-    .. NOTE::
-
-        The current implementation produces deterministic ciphertexts
-        for the paper test vectors, but they do not yet match the
-        exact expected values from the specification (e.g. Blink-64a
-        gives ``0xa09a803255fdb13b`` instead of
-        ``0xa4a0d10502be846e``).  This is because subtle details of
-        the THF construction (exact ``π`` definitions, ``dh(t)``
-        handling, or key-indexing conventions) require the reference
-        Verilog implementation for unambiguous confirmation.
-
     INPUT:
 
-    - ``variant`` -- string; one of ``"64a"``, ``"128a"``, ``"128A"``.
+    - ``variant`` -- string; one of ``"64a"``, ``"64b"``, ``"128a"``,
+      ``"128b"``, ``"128A"``, ``"128B"``.
 
     EXAMPLES::
 
@@ -400,78 +470,257 @@ class THF_Blink_Encryptor:
         sage: enc = THF_Blink_Encryptor("64a")
         sage: k_64a = 0xd6a102d888a467e4d1d7dec33a246943e07c1dc6f302c57e762c2df9de6f0d216dd387874a0b52ce3022e0ad78c78a0697779021b38e7fa1
         sage: hex(enc.encrypt(m=0x0, t=0x0123456789abcdef, k=k_64a))
-        '0xa09a803255fdb13b'
+        '0xa4a0d10502be846e'
+        sage: enc.decrypt(c=0xa4a0d10502be846e, t=0x0123456789abcdef, k=k_64a)
+        0
     """
 
     _VARIANTS = {
-        "64a":   {"n": 64,  "a": 2, "b": 3, "word_perm": _BLINK_P_64},
-        "128a":  {"n": 128, "a": 3, "b": 3, "word_perm": _BLINK_P_128},
-        "128A":  {"n": 128, "a": 3, "b": 5, "word_perm": _BLINK_P_128},
+        "64a":  {"n": 64,  "state_bytes": 8,  "tweak_bytes": 8,  "key_bytes": 56,  "ra": 2, "rb": 3, "pbox": _BLINK_P_64},
+        "64b":  {"n": 64,  "state_bytes": 8,  "tweak_bytes": 16, "key_bytes": 56,  "ra": 2, "rb": 3, "pbox": _BLINK_P_64},
+        "128a": {"n": 128, "state_bytes": 16, "tweak_bytes": 16, "key_bytes": 128, "ra": 3, "rb": 3, "pbox": _BLINK_P_128},
+        "128b": {"n": 128, "state_bytes": 16, "tweak_bytes": 32, "key_bytes": 128, "ra": 3, "rb": 3, "pbox": _BLINK_P_128},
+        "128A": {"n": 128, "state_bytes": 16, "tweak_bytes": 16, "key_bytes": 160, "ra": 3, "rb": 5, "pbox": _BLINK_P_128},
+        "128B": {"n": 128, "state_bytes": 16, "tweak_bytes": 32, "key_bytes": 160, "ra": 3, "rb": 5, "pbox": _BLINK_P_128},
     }
 
     def __init__(self, variant):
         if variant not in self._VARIANTS:
             raise ValueError(f"unsupported variant {variant!r}")
+        p = self._VARIANTS[variant]
         self.variant = variant
-        self.params = self._VARIANTS[variant]
-        self.n = self.params["n"]
-        self.a = self.params["a"]
-        self.b = self.params["b"]
-        self.word_perm = self.params["word_perm"]
-        self.num_words = self.n // 4
-        self.num_cols = self.num_words // 4
+        self.n = p["n"]
+        self.state_bytes = p["state_bytes"]
+        self.tweak_bytes = p["tweak_bytes"]
+        self.key_bytes = p["key_bytes"]
+        self.ra = p["ra"]
+        self.rb = p["rb"]
+        self.pbox = p["pbox"]
+        self.state_nibbles = self.state_bytes * 2
 
         if self.n == 64:
             self.rc, self.rc_prime = blink_round_constants_64()
         else:
             self.rc, self.rc_prime = blink_round_constants_128()
 
-        from civerly.util import int_to_vec, vec_to_int
-        self._int_to_vec = int_to_vec
-        self._vec_to_int = vec_to_int
+    # --- Primitive byte-level operations ---------------------------------
 
-        # Build Sage matrices once
-        self._mixcol = _create_blink_mixcolumn_matrix(self.n)
-        self._sbox = _BLINK_SBOX_VALUES
-        self._p = self.word_perm
-        self._p_inv = [0] * self.num_words
-        for i in range(self.num_words):
-            self._p_inv[self._p[i]] = i
+    def _sub_bytes(self, state):
+        for i in range(self.state_bytes):
+            hi = _BLINK_SBOX_VALUES[(state[i] >> 4) & 0xF]
+            lo = _BLINK_SBOX_VALUES[state[i] & 0xF]
+            state[i] = ((hi << 4) | lo) & 0xFF
 
-    # ------------------------------------------------------------------
-    # Low-level operations
-    # ------------------------------------------------------------------
-    def _apply_sbox(self, state):
-        nibs = [(state >> (4 * i)) & 0xf for i in range(self.num_words)]
-        out = [self._sbox[x] for x in nibs]
-        return sum(out[i] << (4 * i) for i in range(self.num_words))
+    def _mix_columns(self, state):
+        cols = self.state_nibbles // 4
+        for col in range(cols):
+            coldata = [0] * 4
+            for r in range(4):
+                idx = col + r * cols
+                byte_index = idx // 2
+                high_nibble = (idx % 2 == 1)
+                nibble = (state[byte_index] >> 4) & 0xF if high_nibble else state[byte_index] & 0xF
+                coldata[r] = nibble
+            result = [0] * 4
+            for r in range(4):
+                for c in range(4):
+                    if _M_MATRIX[r][c]:
+                        result[r] ^= coldata[c]
+            for r in range(4):
+                idx = col + r * cols
+                byte_index = idx // 2
+                high_nibble = (idx % 2 == 1)
+                if high_nibble:
+                    state[byte_index] = ((result[r] << 4) | (state[byte_index] & 0xF)) & 0xFF
+                else:
+                    state[byte_index] = (state[byte_index] & 0xF0) | result[r]
 
-    def _apply_mix(self, state):
-        return int(self._vec_to_int(self._mixcol * self._int_to_vec(state, self.n)))
+    def _add_round_key(self, state, round_key):
+        for i in range(self.state_bytes):
+            state[i] ^= round_key[i]
 
-    def _apply_perm(self, state):
-        nibs = [(state >> (4 * i)) & 0xf for i in range(self.num_words)]
-        out = [nibs[self._p[i]] for i in range(self.num_words)]
-        return sum(out[i] << (4 * i) for i in range(self.num_words))
+    def _add_round_constant(self, state, constant):
+        for i in range(self.state_bytes):
+            state[i] ^= constant[i]
 
-    def _apply_perm_inv(self, state):
-        nibs = [(state >> (4 * i)) & 0xf for i in range(self.num_words)]
-        out = [nibs[self._p_inv[i]] for i in range(self.num_words)]
-        return sum(out[i] << (4 * i) for i in range(self.num_words))
+    def _permutation(self, state):
+        temp = [0] * self.state_nibbles
+        for i in range(self.state_nibbles):
+            byte_index = i // 2
+            high_nibble = (i % 2 == 1)
+            temp[i] = (state[byte_index] >> 4) & 0xF if high_nibble else state[byte_index] & 0xF
+        permuted = [0] * self.state_nibbles
+        for i in range(self.state_nibbles):
+            permuted[i] = temp[self.pbox[i]]
+        for i in range(self.state_bytes):
+            state[i] = ((permuted[2 * i + 1] << 4) | permuted[2 * i]) & 0xFF
 
-    def _round_fwd(self, state, key):
-        return self._apply_perm(int(state) ^ int(self._apply_mix(self._apply_sbox(state))) ^ int(key))
+    def _inv_permutation(self, state):
+        temp = [0] * self.state_nibbles
+        for i in range(self.state_nibbles):
+            byte_index = i // 2
+            high_nibble = (i % 2 == 1)
+            temp[i] = (state[byte_index] >> 4) & 0xF if high_nibble else state[byte_index] & 0xF
+        permuted = [0] * self.state_nibbles
+        for i in range(self.state_nibbles):
+            permuted[self.pbox[i]] = temp[i]
+        for i in range(self.state_bytes):
+            state[i] = ((permuted[2 * i + 1] << 4) | permuted[2 * i]) & 0xFF
 
-    def _round_inv(self, state, key):
-        temp = self._apply_perm_inv(state)
-        temp = int(temp) ^ int(key)
-        temp = self._apply_mix(temp)
-        temp = self._apply_sbox(temp)
-        return temp
+    def _whitening(self, state, w):
+        for i in range(self.state_bytes):
+            state[i] ^= w[i]
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # --- Hash & key schedule (exposed for testing) -----------------------
+
+    @staticmethod
+    def _hash_func(key, t, state_bytes, tweak_bytes):
+        h = [0] * state_bytes
+        for i in range(state_bytes - 1, -1, -1):
+            h[state_bytes - 1 - i] = 0
+            for l in range(8):
+                temp = [0] * tweak_bytes
+                for j in range(tweak_bytes):
+                    left = (key[tweak_bytes + i - j] << l) & 0xFF
+                    right = (key[tweak_bytes + i - j - 1] >> (8 - l)) & 0xFF
+                    temp[tweak_bytes - 1 - j] = left ^ right
+                p = 0
+                for j in range(tweak_bytes):
+                    p ^= (t[j] & temp[j])
+                    p &= 0xFF
+                h[state_bytes - 1 - i] ^= (_HW2[p] << l)
+                h[state_bytes - 1 - i] &= 0xFF
+        return h
+
+    def _generate_round_key(self, master_key, t):
+        key_prime = [0] * self.key_bytes
+        for i in range(self.key_bytes):
+            for j in range(8):
+                bit_index = (11 * (8 * i + j)) % (self.key_bytes * 8)
+                byte_idx = bit_index // 8
+                bit_in_byte = bit_index % 8
+                bit_val = (master_key[byte_idx] >> bit_in_byte) & 1
+                key_prime[i] ^= (bit_val << j)
+                key_prime[i] &= 0xFF
+
+        rk = [[0] * self.state_bytes for _ in range(self.ra + self.rb)]
+        w = [[0] * self.state_bytes for _ in range(2)]
+        h = [[0] * self.state_bytes for _ in range(2)]
+
+        for i in range(self.state_bytes):
+            w[0][i] = master_key[i]
+            w[1][i] = master_key[i + self.state_bytes]
+            for j in range(self.ra + self.rb):
+                rk[j][i] = master_key[i + (j + 2) * self.state_bytes]
+
+        hk_len = self.state_bytes + self.tweak_bytes
+        hk = [[0] * hk_len for _ in range(2)]
+        for i in range(hk_len - 1, -1, -1):
+            if i > 0:
+                hk[0][i] = ((key_prime[i] << 1) ^ (key_prime[i - 1] >> 7)) & 0xFF
+                val = (key_prime[i + hk_len] << 2) & 0xFF
+                val2 = (key_prime[i + hk_len - 1] >> 6) & 0xFF
+                hk[1][i] = (val ^ val2) & 0xFF
+            else:
+                hk[0][i] = (key_prime[i] << 1) & 0xFF
+                val = (key_prime[i + hk_len] << 2) & 0xFF
+                val2 = (key_prime[i + hk_len - 1] >> 6) & 0xFF
+                hk[1][i] = ((val ^ val2) & 0xFE) & 0xFF
+
+        h[0] = self._hash_func(hk[0], t, self.state_bytes, self.tweak_bytes)
+        h[1] = self._hash_func(hk[1], t, self.state_bytes, self.tweak_bytes)
+        return rk, w, h
+
+    # --- Byte-level encrypt / decrypt ------------------------------------
+
+    def _encrypt_bytes(self, state, rk, w, h):
+        self._whitening(state, w[0])
+        for r in range(self.ra):
+            self._sub_bytes(state)
+            self._mix_columns(state)
+            self._add_round_key(state, rk[r])
+            self._add_round_constant(state, _int_to_bytes(self.rc[r], self.state_bytes))
+            self._permutation(state)
+        self._sub_bytes(state)
+        self._mix_columns(state)
+        self._add_round_key(state, h[0])
+        self._permutation(state)
+        for r in range(self.rb):
+            self._sub_bytes(state)
+            self._mix_columns(state)
+            self._add_round_key(state, rk[r + self.ra])
+            self._add_round_constant(state, _int_to_bytes(self.rc[r + self.ra], self.state_bytes))
+            self._permutation(state)
+
+        h_xor = [h[0][i] ^ h[1][i] for i in range(self.state_bytes)]
+        self._sub_bytes(state)
+        self._mix_columns(state)
+        self._add_round_key(state, h_xor)
+        self._sub_bytes(state)
+
+        for r in range(self.rb):
+            self._inv_permutation(state)
+            self._add_round_constant(state, _int_to_bytes(self.rc_prime[r], self.state_bytes))
+            self._add_round_key(state, rk[r])
+            self._mix_columns(state)
+            self._sub_bytes(state)
+        self._inv_permutation(state)
+        self._add_round_key(state, h[1])
+        self._mix_columns(state)
+        self._sub_bytes(state)
+        for r in range(self.ra):
+            self._inv_permutation(state)
+            self._add_round_constant(state, _int_to_bytes(self.rc_prime[r + self.rb], self.state_bytes))
+            self._add_round_key(state, rk[r + self.rb])
+            self._mix_columns(state)
+            self._sub_bytes(state)
+        self._whitening(state, w[1])
+
+    def _decrypt_bytes(self, state, rk, w, h):
+        self._whitening(state, w[1])
+        for r in range(self.ra):
+            self._sub_bytes(state)
+            self._mix_columns(state)
+            self._add_round_key(state, rk[self.ra + self.rb - r - 1])
+            self._add_round_constant(state, _int_to_bytes(self.rc_prime[self.ra + self.rb - r - 1], self.state_bytes))
+            self._permutation(state)
+        self._sub_bytes(state)
+        self._mix_columns(state)
+        self._add_round_key(state, h[1])
+        self._permutation(state)
+        for r in range(self.rb):
+            self._sub_bytes(state)
+            self._mix_columns(state)
+            self._add_round_key(state, rk[self.rb - r - 1])
+            self._add_round_constant(state, _int_to_bytes(self.rc_prime[self.rb - r - 1], self.state_bytes))
+            self._permutation(state)
+
+        h_xor = [h[0][i] ^ h[1][i] for i in range(self.state_bytes)]
+        self._sub_bytes(state)
+        self._add_round_key(state, h_xor)
+        self._mix_columns(state)
+        self._sub_bytes(state)
+
+        for r in range(self.rb):
+            self._inv_permutation(state)
+            self._add_round_constant(state, _int_to_bytes(self.rc[self.ra + self.rb - r - 1], self.state_bytes))
+            self._add_round_key(state, rk[self.ra + self.rb - r - 1])
+            self._mix_columns(state)
+            self._sub_bytes(state)
+        self._inv_permutation(state)
+        self._add_round_key(state, h[0])
+        self._mix_columns(state)
+        self._sub_bytes(state)
+        for r in range(self.ra):
+            self._inv_permutation(state)
+            self._add_round_constant(state, _int_to_bytes(self.rc[self.ra - r - 1], self.state_bytes))
+            self._add_round_key(state, rk[self.ra - r - 1])
+            self._mix_columns(state)
+            self._sub_bytes(state)
+        self._whitening(state, w[0])
+
+    # --- Public integer API ----------------------------------------------
+
     def encrypt(self, m, t, k):
         r"""
         Encrypt one message block under the Blink THF mode.
@@ -487,45 +736,36 @@ class THF_Blink_Encryptor:
         OUTPUT:
 
         Integer ciphertext block.
-
-        The construction follows Figure 2 of the Blink paper:
-
-        #. ``a`` forward rounds,
-        #. XOR with :math:`h_1(t)`,
-        #. ``b`` forward rounds,
-        #. Reflector ``S \to MK_{h(t)} \to S``,
-        #. ``b`` inverse rounds (reversed keys and ``rc'`` constants),
-        #. XOR with :math:`h_2(t)`,
-        #. ``a`` inverse rounds (reversed keys and ``rc'`` constants),
-        #. XOR with whitening key :math:`w_2`.
         """
-        rk, w1, w2, k1, k2 = blink_key_schedule(k, self.n, self.a, self.b)
-        h1 = blink_toeplitz_hash(k1, t, self.n, self.n)
-        h2 = blink_toeplitz_hash(k2, t, self.n, self.n)
-        h = int(h1) ^ int(h2)
+        state = _int_to_bytes(m, self.state_bytes)
+        t_bytes = _int_to_bytes(t, self.tweak_bytes)
+        master_key = _int_to_bytes(k, self.key_bytes)
+        rk, w, h = self._generate_round_key(master_key, t_bytes)
+        self._encrypt_bytes(state, rk, w, h)
+        return _bytes_to_int(state)
 
-        state = int(m) ^ int(w1)
-        for i in range(self.a):
-            state = self._round_fwd(state, int(rk[i]) ^ int(self.rc[i]))
-        state = int(state) ^ int(h1)
-        for i in range(self.b):
-            state = self._round_fwd(state, int(rk[self.a + i]) ^ int(self.rc[self.a + i]))
+    def decrypt(self, c, t, k):
+        r"""
+        Decrypt one ciphertext block under the Blink THF mode.
 
-        # Reflector: S -> MK_h -> S
-        state = self._apply_sbox(state)
-        state = int(self._apply_mix(state)) ^ int(h)
-        state = self._apply_sbox(state)
+        INPUT:
 
-        # Bottom half (inverse rounds, reversed keys)
-        drk = list(reversed(rk))
-        for i in range(self.b):
-            state = self._round_inv(state, int(drk[i]) ^ int(self.rc_prime[i]))
-        state = int(state) ^ int(h2)
-        for i in range(self.a):
-            state = self._round_inv(state, int(drk[self.b + i]) ^ int(self.rc_prime[self.b + i]))
+        - ``c`` -- integer; the ciphertext block (``n`` bits).
 
-        state = int(state) ^ int(w2)
-        return state
+        - ``t`` -- integer; the tweak (``n`` bits for Blink).
+
+        - ``k`` -- integer; the master key ``(a+b+2)*n`` bits.
+
+        OUTPUT:
+
+        Integer plaintext block.
+        """
+        state = _int_to_bytes(c, self.state_bytes)
+        t_bytes = _int_to_bytes(t, self.tweak_bytes)
+        master_key = _int_to_bytes(k, self.key_bytes)
+        rk, w, h = self._generate_round_key(master_key, t_bytes)
+        self._decrypt_bytes(state, rk, w, h)
+        return _bytes_to_int(state)
 
 
 # ----------------------------------------------------------------------
