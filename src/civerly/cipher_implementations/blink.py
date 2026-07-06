@@ -1,371 +1,44 @@
-
-r"""
-Implementation of the Blink tweakable block cipher.
-
-Blink is a low-latency tweakable block cipher based on the THF (Tweakable
-Hasher Framework) mode.  This module provides two CiVerLy cipher classes:
-
-* ``BLINK64_CVL`` -- 64-bit block size (variants ``"64a"`` and ``"64b"``).
-* ``BLINK128_CVL`` -- 128-bit block size (variants ``"128a"``, ``"128b"``,
-  ``"128A"`` and ``"128B"``).
-
-Both classes work in two modes:
-
-1. **THF mode** (activated by supplying ``k`` and ``t``): full tweakable
-   block-cipher construction with key schedule, Toeplitz tweak hashing,
-   round constants, whitening and the reflector.
-2. **SPN mode** (backward compatible): bare iterated SPN
-   :math:`R = P \circ AC \circ AK \circ M \circ S` with user-supplied
-   round keys.
-
-EXAMPLES:
-
-Basic SPN-mode encryption with 64-bit block size::
-
-    sage: from civerly.cipher_implementations.blink import BLINK64_CVL
-    sage: from civerly.util import int_to_vec, vec_to_int
-    sage: blink = BLINK64_CVL(R=2)
-    sage: plaintext = int_to_vec(0x0, 64)
-    sage: ciphertext = blink(plaintext)
-    sage: len(ciphertext)
-    64
-    sage: vec_to_int(ciphertext)
-    0
-
-Basic SPN-mode encryption with 128-bit block size::
-
-    sage: from civerly.cipher_implementations.blink import BLINK128_CVL
-    sage: from civerly.util import int_to_vec, vec_to_int
-    sage: blink = BLINK128_CVL(R=2)
-    sage: plaintext = int_to_vec(0x0, 128)
-    sage: ciphertext = blink(plaintext)
-    sage: len(ciphertext)
-    128
-    sage: vec_to_int(ciphertext)
-    0
-
-Encrypted outputs for particular round keys (bare SPN)::
-
-    sage: from civerly.cipher_implementations.blink import BLINK64_CVL, BLINK128_CVL
-    sage: from civerly.util import int_to_vec, vec_to_int
-
-    For Blink-64a (7 round keys, R=6)::
-
-    sage: rks_64a = [
-    ....:   0xd6a102d888a467e4, 0xd1d7dec33a246943, 0xe07c1dc6f302c57e,
-    ....:   0x762c2df9de6f0d21, 0x6dd387874a0b52ce, 0x3022e0ad78c78a06,
-    ....:   0x97779021b38e7fa1]
-    sage: blink64 = BLINK64_CVL(R=6, rks=rks_64a)
-    sage: result = vec_to_int(blink64(int_to_vec(0x0, 64)))
-    sage: result == 0xe04d07b55f205fa5
-    True
-
-    For Blink-128a (8 round keys, R=7)::
-
-    sage: rks_128a = [
-    ....:   0xd6a102d888a467e4d1d7dec33a246943,
-    ....:   0xe07c1dc6f302c57e762c2df9de6f0d21,
-    ....:   0x6dd387874a0b52ce3022e0ad78c78a06,
-    ....:   0x97779021b38e7fa15e2b66350517f80f,
-    ....:   0x2961c648d578bae174d70cb769c30a45,
-    ....:   0xcc40300fe8a342ca57a0bd0251ae39b6,
-    ....:   0x21b8f104904374bbd6a102e234a664e4,
-    ....:   0x21b8f104904374bbd6a102d888a666e4]
-    sage: blink128 = BLINK128_CVL(R=7, rks=rks_128a)
-    sage: result = vec_to_int(blink128(int_to_vec(0x0, 128)))
-    sage: result == 0x1da156e3a7aed272a083cadf35c4d292
-    True
 """
-from civerly.cipher import Cipher
-from civerly.wordsboxcipher import WordSBoxCipher
-from civerly.component import Component, SBox_CVL, LinearLayer_CVL, PermuteLayer_CVL, RoundkeyXOR_CVL
-from civerly.util import int_to_vec, vec_to_int
+Blink tweakable block cipher -- CiVerLy implementation.
+
+This module implements the Blink family of tweakable block ciphers (Wang et
+al., "THF: Designing Low-Latency Tweakable Block Ciphers") as CiVerLy cipher
+objects. All six published variants are supported:
+
+    Blink-64a   (64-bit block,  64-bit tweak,  56-byte key,  a=2, b=3)
+    Blink-64b   (64-bit block, 128-bit tweak,  56-byte key,  a=2, b=3)
+    Blink-128a  (128-bit block, 128-bit tweak, 128-byte key, a=3, b=3)
+    Blink-128b  (128-bit block, 256-bit tweak, 128-byte key, a=3, b=3)
+    Blink-128A  (128-bit block, 128-bit tweak, 160-byte key, a=3, b=5)
+    Blink-128B  (128-bit block, 256-bit tweak, 160-byte key, a=3, b=5)
+
+The internal state is organised as a rectangular array of 4-bit nibbles with
+4 rows, which makes ``AESlike`` (wordsize 4) the natural base class: the
+MixColumn layer acts column-wise and the shuffle layer acts on the whole
+state. The rather involved key schedule (Toeplitz-hash based) is treated as a
+black box and baked into the graph as ``RoundkeyXOR_CVL`` constants, exactly
+as recommended in ``documentation/README.md`` section 6. This keeps the
+cipher fully compatible with the modeling pipeline while still matching the
+published test vectors.
+"""
+
+from sage.crypto.sbox import SBox
+from sage.matrix.special import identity_matrix, block_matrix
 from sage.matrix.constructor import Matrix as matrix
 from sage.rings.finite_rings.finite_field_constructor import GF
-from sage.crypto.sbox import SBox
+
+from civerly.wordsboxcipher import WordSBoxCipher
+from civerly.component import SBox_CVL, LinearLayer_CVL, PermuteLayer_CVL
+from civerly.component import RoundkeyXOR_CVL
+
+from civerly.util import int_to_vec, vec_to_int
 
 
-# Blink S-box (4-bit, involutory)
-_BLINK_SBOX_VALUES = [0x1, 0x0, 0x9, 0x3, 0x8, 0x5, 0xe, 0x7,
-                      0x4, 0x2, 0xc, 0xb, 0xa, 0xf, 0x6, 0xd]
+# ---------------------------------------------------------------------------
+# Shared tables
+# ---------------------------------------------------------------------------
 
-# Shuffle permutations from the Blink specification
-_BLINK_P_64 = [0, 5, 11, 10, 1, 6, 4, 13, 2, 12, 9, 15, 3, 7, 14, 8]
-_BLINK_P_128 = [5, 12, 4, 1, 17, 9, 10, 16, 28, 14, 21, 22, 11, 27, 8, 13,
-                2, 25, 18, 3, 30, 6, 19, 20, 0, 23, 24, 31, 7, 15, 29, 26]
-
-
-def _create_blink_mixcolumn_matrix(block_size_bits):
-    r"""
-    Create the MixColumn matrix for Blink.
-
-    The Blink MixColumn uses the Midori MixColumn matrix:
-    M = [[0, 1, 1, 1],
-         [1, 0, 1, 1],
-         [1, 1, 0, 1],
-         [1, 1, 1, 0]]
-
-    This matrix is applied to each 4-nibble column independently.
-    The number of columns is block_size_bits / 16 (since each column has 4 nibbles).
-
-    EXAMPLES::
-
-        sage: from civerly.cipher_implementations.blink import _create_blink_mixcolumn_matrix
-        sage: M = _create_blink_mixcolumn_matrix(64)
-        sage: M.nrows(), M.ncols()
-        (64, 64)
-        sage: M.det() != 0
-        True
-
-    The MixColumn matrix is involutory (M^2 = I)::
-
-        sage: M = _create_blink_mixcolumn_matrix(64)
-        sage: Msq = M**2
-        sage: all(Msq[i,i] == 1 for i in range(64))  # diagonal is all 1
-        True
-        sage: all(Msq[i,j] == 0 for i in range(64) for j in range(64) if i != j)  # off-diagonal is all 0
-        True
-    """
-    M_nibble = [[0, 1, 1, 1],
-                [1, 0, 1, 1],
-                [1, 1, 0, 1],
-                [1, 1, 1, 0]]
-
-    block_size_words = block_size_bits // 4
-    num_columns = block_size_words // 4
-
-    # Create block-diagonal matrix with the 4x4 nibble matrix applied
-    # to each Blink column.  In the paper the state is row-major:
-    #   column j consists of s_j, s_{j+4}, s_{j+8}, s_{j+12}.
-    # Mapping from CiVerLy word index w to paper nibble s_x is
-    #   w = block_size_words - 1 - x  (word 0 is the MSB nibble).
-    M = matrix(GF(2), block_size_bits, block_size_bits)
-    for j in range(num_columns):
-        col_words = [block_size_words - 1 - (j + r * num_columns) for r in range(4)]
-        for row in range(4):
-            for col in range(4):
-                if M_nibble[row][col] == 1:
-                    for bit in range(4):
-                        out_bit = col_words[row] * 4 + bit
-                        in_bit = col_words[col] * 4 + bit
-                        M[out_bit, in_bit] = 1
-
-    return M
-
-
-def blink_round_constants_64():
-    r"""
-    Return the 64-bit round constants for Blink.
-
-    The constants correspond to the values given in Appendix D of the
-    Blink specification (THF paper).
-
-    OUTPUT:
-
-    A pair ``(rc, rc_prime)`` where each is a list of five 64-bit
-    integers.
-
-    EXAMPLES::
-
-        sage: from civerly.cipher_implementations.blink import blink_round_constants_64
-        sage: rc, rc_prime = blink_round_constants_64()
-        sage: len(rc), len(rc_prime)
-        (5, 5)
-        sage: hex(rc[0])
-        '0x13198a2e03707344'
-        sage: format(rc_prime[0], '#018x')
-        '0x0d95748f728eb658'
-    """
-    rc = [
-        0x13198a2e03707344,
-        0x082efa98ec4e6c89,
-        0xbe5466cf34e90c6c,
-        0x3f84d5b5b5470917,
-        0xd1310ba698dfb5ac,
-    ]
-    rc_prime = [
-        0x0d95748f728eb658,
-        0x7b54a41dc25a59b5,
-        0xc5d1b023286085f0,
-        0x8e79dcb0603a180e,
-        0xd71577c1bd314b27,
-    ]
-    return rc, rc_prime
-
-
-def blink_round_constants_128():
-    r"""
-    Return the 128-bit round constants for Blink.
-
-    The constants correspond to the values given in Appendix D of the
-    Blink specification (THF paper).
-
-    OUTPUT:
-
-    A pair ``(rc, rc_prime)`` where each is a list of eight 128-bit
-    integers.
-
-    EXAMPLES::
-
-        sage: from civerly.cipher_implementations.blink import blink_round_constants_128
-        sage: rc, rc_prime = blink_round_constants_128()
-        sage: len(rc), len(rc_prime)
-        (8, 8)
-        sage: hex(rc[0])
-        '0x243f6a8885a308d313198a2e03707344'
-    """
-    rc = [
-        0x243f6a8885a308d313198a2e03707344,
-        0xa4093822299f31d0082efa98ec4e6c89,
-        0x452821e638d01377be5466cf34e90c6c,
-        0xc0ac29b7c97c50dd3f84d5b5b5470917,
-        0x9216d5d98979fb1bd1310ba698dfb5ac,
-        0x2ffd72dbd01adfb7b8e1afed6a267e96,
-        0xba7c9045f12c7f9924a19947b3916cf7,
-        0x0801f2e2858efc16636920d871574e69,
-    ]
-    rc_prime = [
-        0xa458fea3f4933d7e0d95748f728eb658,
-        0x718bcd5882154aee7b54a41dc25a59b5,
-        0x9c30d5392af26013c5d1b023286085f0,
-        0xca417918b8db38ef8e79dcb0603a180e,
-        0x6c9e0e8bb01e8a3ed71577c1bd314b27,
-        0x78af2fda55605c60e65525f3aa55ab94,
-        0x5748986263e8144055ca396a2aab10b6,
-        0xb4cc5c341141e8cea15486af7c72e993,
-    ]
-    return rc, rc_prime
-
-
-def blink_k_prime(k, total_bits):
-    r"""
-    Compute the rearranged key :math:`k'` from the master key :math:`k`.
-
-    The rearrangement follows the Blink key schedule (Section 5.4 of
-    the THF paper):
-
-    .. MATH::
-
-        k'_i = k_{11 \cdot i \bmod N}, \qquad 0 \le i < N
-
-    where :math:`N` is ``total_bits``.
-
-    INPUT:
-
-    - ``k`` -- integer; the master key.
-
-    - ``total_bits`` -- integer; the length of the key in bits.
-
-    OUTPUT:
-
-    Integer representing the rearranged key :math:`k'`.
-
-    EXAMPLES::
-
-        sage: from civerly.cipher_implementations.blink import blink_k_prime
-        sage: k = 0b101010
-        sage: k_prime = blink_k_prime(k, 6)
-        sage: bin(k_prime)
-        '0b101010'
-    """
-    k_prime = 0
-    for i in range(total_bits):
-        src_idx = (11 * i) % total_bits
-        if (k >> src_idx) & 1:
-            k_prime |= (1 << i)
-    return k_prime
-
-
-def blink_key_schedule(k, n, a, b):
-    r"""
-    Parse a master key into the format used by the Blink THF mode.
-
-    The master key of length ``(a + b + 2) * n`` bits is divided into
-    ``a + b`` round keys ``rk_1 || ... || rk_{a+b}`` and two whitening
-    keys ``w2 || w1`` (with ``w1`` as the least-significant `n` bits).
-    The rearranged key ``k'`` is also derived, from which the Toeplitz
-    hash keys ``k2`` and ``k1`` are taken.
-
-    INPUT:
-
-    - ``k`` -- integer; the master key.
-
-    - ``n`` -- integer; the block size in bits (64 or 128).
-
-    - ``a`` -- integer; THF parameter :math:`a`.
-
-    - ``b`` -- integer; THF parameter :math:`b`.
-
-    OUTPUT:
-
-    A 5-tuple ``(rk, w1, w2, k1, k2)`` where ``rk`` is a list of round
-    keys ``[rk_1, ..., rk_{a+b}]`` (least-significant block first),
-    ``w1`` and ``w2`` are whitening keys, and ``k1``, ``k2`` are the
-    hash keys for the Toeplitz hash.
-
-    EXAMPLES::
-
-        sage: from civerly.cipher_implementations.blink import blink_key_schedule
-        sage: k = 0x00050004000300020001  # 5*16=80 bits, n=16, a=2, b=1
-        sage: rk, w1, w2, k1, k2 = blink_key_schedule(k, 16, 2, 1)
-        sage: [hex(x) for x in rk]
-        ['0x3', '0x4', '0x5']
-        sage: hex(w1)
-        '0x1'
-        sage: hex(w2)
-        '0x2'
-    """
-    total_bits = (a + b + 2) * n
-    key_bytes = total_bits // 8
-    state_bytes = n // 8
-    tweak_bytes = n // 8
-    hk_len = state_bytes + tweak_bytes
-
-    # Convert master key to little-endian byte list
-    master_key = [(k >> (8 * i)) & 0xFF for i in range(key_bytes)]
-
-    w1 = k & ((1 << n) - 1)
-    w2 = (k >> n) & ((1 << n) - 1)
-
-    rks = []
-    for i in range(a + b):
-        rk_val = (k >> (2 * n + i * n)) & ((1 << n) - 1)
-        rks.append(rk_val)
-
-    # Derive k' (bit permutation)
-    k_prime = [0] * key_bytes
-    for i in range(key_bytes):
-        for j in range(8):
-            bit_index = (11 * (8 * i + j)) % total_bits
-            byte_idx = bit_index // 8
-            bit_in_byte = bit_index % 8
-            bit_val = (master_key[byte_idx] >> bit_in_byte) & 1
-            k_prime[i] ^= (bit_val << j)
-            k_prime[i] &= 0xFF
-
-    # Derive hash keys (byte-level shift, matching the reference)
-    hk0 = [0] * hk_len
-    hk1 = [0] * hk_len
-    for i in range(hk_len - 1, -1, -1):
-        if i > 0:
-            hk0[i] = ((k_prime[i] << 1) ^ (k_prime[i - 1] >> 7)) & 0xFF
-            val = (k_prime[i + hk_len] << 2) & 0xFF
-            val2 = (k_prime[i + hk_len - 1] >> 6) & 0xFF
-            hk1[i] = (val ^ val2) & 0xFF
-        else:
-            hk0[i] = (k_prime[i] << 1) & 0xFF
-            val = (k_prime[i + hk_len] << 2) & 0xFF
-            val2 = (k_prime[i + hk_len - 1] >> 6) & 0xFF
-            hk1[i] = ((val ^ val2) & 0xFE) & 0xFF
-
-    k1 = sum(hk0[i] << (8 * i) for i in range(hk_len))
-    k2 = sum(hk1[i] << (8 * i) for i in range(hk_len))
-
-    return rks, w1, w2, k1, k2
-
-
-# HW2 parity table used by the byte-level Toeplitz hash
-_HW2 = [
+HW2 = [
     0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
     1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
     1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
@@ -384,626 +57,582 @@ _HW2 = [
     0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
 ]
 
-# MixColumn matrix (nibble-level, same as Midori)
-_M_MATRIX = [
+# The 4-bit S-box S(x) of Blink (an involution).
+SBOX = SBox([
+    0x1, 0x0, 0x9, 0x3,
+    0x8, 0x5, 0xE, 0x7,
+    0x4, 0x2, 0xC, 0xB,
+    0xA, 0xF, 0x6, 0xD,
+])
+
+# The Midori involutory diffusion matrix M.
+M_MATRIX = [
     [0, 1, 1, 1],
     [1, 0, 1, 1],
     [1, 1, 0, 1],
     [1, 1, 1, 0],
 ]
 
+# Variant-specific shuffle boxes (paper notation, see ``blink.md``).
+PBOX_64 = [
+    0, 5, 11, 10,
+    1, 6, 4, 13,
+    2, 12, 9, 15,
+    3, 7, 14, 8,
+]
 
-def _int_to_bytes(val, num_bytes):
-    """Convert an integer to a little-endian byte list."""
-    return [(val >> (8 * i)) & 0xFF for i in range(num_bytes)]
+PBOX_128 = [
+    5, 12, 4, 1, 17, 9, 10, 16,
+    28, 14, 21, 22, 11, 27, 8, 13,
+    2, 25, 18, 3, 30, 6, 19, 20,
+    0, 23, 24, 31, 7, 15, 29, 26,
+]
+
+# Variant-specific round constants (rc and rc'). Indexed by [round][byte].
+ROUND_CONST_64 = [
+    [0x44, 0x73, 0x70, 0x03, 0x2e, 0x8a, 0x19, 0x13],
+    [0x89, 0x6c, 0x4e, 0xec, 0x98, 0xfa, 0x2e, 0x08],
+    [0x6c, 0x0c, 0xe9, 0x34, 0xcf, 0x66, 0x54, 0xbe],
+    [0x17, 0x09, 0x47, 0xb5, 0xb5, 0xd5, 0x84, 0x3f],
+    [0xac, 0xb5, 0xdf, 0x98, 0xa6, 0x0b, 0x31, 0xd1],
+]
+
+ROUND_CONST_PRIME_64 = [
+    [0x58, 0xb6, 0x8e, 0x72, 0x8f, 0x74, 0x95, 0x0d],
+    [0xb5, 0x59, 0x5a, 0xc2, 0x1d, 0xa4, 0x54, 0x7b],
+    [0xf0, 0x85, 0x60, 0x28, 0x23, 0xb0, 0xd1, 0xc5],
+    [0x0e, 0x18, 0x3a, 0x60, 0xb0, 0xdc, 0x79, 0x8e],
+    [0x27, 0x4b, 0x31, 0xbd, 0xc1, 0x77, 0x15, 0xd7],
+]
+
+ROUND_CONST_128a = [
+    [0x44, 0x73, 0x70, 0x03, 0x2e, 0x8a, 0x19, 0x13, 0xd3, 0x08, 0xa3, 0x85, 0x88, 0x6a, 0x3f, 0x24],
+    [0x89, 0x6c, 0x4e, 0xec, 0x98, 0xfa, 0x2e, 0x08, 0xd0, 0x31, 0x9f, 0x29, 0x22, 0x38, 0x09, 0xa4],
+    [0x6c, 0x0c, 0xe9, 0x34, 0xcf, 0x66, 0x54, 0xbe, 0x77, 0x13, 0xd0, 0x38, 0xe6, 0x21, 0x28, 0x45],
+    [0x17, 0x09, 0x47, 0xb5, 0xb5, 0xd5, 0x84, 0x3f, 0xdd, 0x50, 0x7c, 0xc9, 0xb7, 0x29, 0xac, 0xc0],
+    [0xac, 0xb5, 0xdf, 0x98, 0xa6, 0x0b, 0x31, 0xd1, 0x1b, 0xfb, 0x79, 0x89, 0xd9, 0xd5, 0x16, 0x92],
+    [0x96, 0x7e, 0x26, 0x6a, 0xed, 0xaf, 0xe1, 0xb8, 0xb7, 0xdf, 0x1a, 0xd0, 0xdb, 0x72, 0xfd, 0x2f],
+]
+
+ROUND_CONST_PRIME_128a = [
+    [0x58, 0xb6, 0x8e, 0x72, 0x8f, 0x74, 0x95, 0x0d, 0x7e, 0x3d, 0x93, 0xf4, 0xa3, 0xfe, 0x58, 0xa4],
+    [0xb5, 0x59, 0x5a, 0xc2, 0x1d, 0xa4, 0x54, 0x7b, 0xee, 0x4a, 0x15, 0x82, 0x58, 0xcd, 0x8b, 0x71],
+    [0xf0, 0x85, 0x60, 0x28, 0x23, 0xb0, 0xd1, 0xc5, 0x13, 0x60, 0xf2, 0x2a, 0x39, 0xd5, 0x30, 0x9c],
+    [0x0e, 0x18, 0x3a, 0x60, 0xb0, 0xdc, 0x79, 0x8e, 0xef, 0x38, 0xdb, 0xb8, 0x18, 0x79, 0x41, 0xca],
+    [0x27, 0x4b, 0x31, 0xbd, 0xc1, 0x77, 0x15, 0xd7, 0x3e, 0x8a, 0x1e, 0xb0, 0x8b, 0x0e, 0x9e, 0x6c],
+    [0x94, 0xab, 0x55, 0xaa, 0xf3, 0x25, 0x55, 0xe6, 0x60, 0x5c, 0x60, 0x55, 0xda, 0x2f, 0xaf, 0x78],
+]
+
+ROUND_CONST_128A = [
+    [0x44, 0x73, 0x70, 0x03, 0x2e, 0x8a, 0x19, 0x13, 0xd3, 0x08, 0xa3, 0x85, 0x88, 0x6a, 0x3f, 0x24],
+    [0x89, 0x6c, 0x4e, 0xec, 0x98, 0xfa, 0x2e, 0x08, 0xd0, 0x31, 0x9f, 0x29, 0x22, 0x38, 0x09, 0xa4],
+    [0x6c, 0x0c, 0xe9, 0x34, 0xcf, 0x66, 0x54, 0xbe, 0x77, 0x13, 0xd0, 0x38, 0xe6, 0x21, 0x28, 0x45],
+    [0x17, 0x09, 0x47, 0xb5, 0xb5, 0xd5, 0x84, 0x3f, 0xdd, 0x50, 0x7c, 0xc9, 0xb7, 0x29, 0xac, 0xc0],
+    [0xac, 0xb5, 0xdf, 0x98, 0xa6, 0x0b, 0x31, 0xd1, 0x1b, 0xfb, 0x79, 0x89, 0xd9, 0xd5, 0x16, 0x92],
+    [0x96, 0x7e, 0x26, 0x6a, 0xed, 0xaf, 0xe1, 0xb8, 0xb7, 0xdf, 0x1a, 0xd0, 0xdb, 0x72, 0xfd, 0x2f],
+    [0xf7, 0x6c, 0x91, 0xb3, 0x47, 0x99, 0xa1, 0x24, 0x99, 0x7f, 0x2c, 0xf1, 0x45, 0x90, 0x7c, 0xba],
+    [0x69, 0x4e, 0x57, 0x71, 0xd8, 0x20, 0x69, 0x63, 0x16, 0xfc, 0x8e, 0x85, 0xe2, 0xf2, 0x01, 0x08],
+]
+
+ROUND_CONST_PRIME_128A = [
+    [0x58, 0xb6, 0x8e, 0x72, 0x8f, 0x74, 0x95, 0x0d, 0x7e, 0x3d, 0x93, 0xf4, 0xa3, 0xfe, 0x58, 0xa4],
+    [0xb5, 0x59, 0x5a, 0xc2, 0x1d, 0xa4, 0x54, 0x7b, 0xee, 0x4a, 0x15, 0x82, 0x58, 0xcd, 0x8b, 0x71],
+    [0xf0, 0x85, 0x60, 0x28, 0x23, 0xb0, 0xd1, 0xc5, 0x13, 0x60, 0xf2, 0x2a, 0x39, 0xd5, 0x30, 0x9c],
+    [0x0e, 0x18, 0x3a, 0x60, 0xb0, 0xdc, 0x79, 0x8e, 0xef, 0x38, 0xdb, 0xb8, 0x18, 0x79, 0x41, 0xca],
+    [0x27, 0x4b, 0x31, 0xbd, 0xc1, 0x77, 0x15, 0xd7, 0x3e, 0x8a, 0x1e, 0xb0, 0x8b, 0x0e, 0x9e, 0x6c],
+    [0x94, 0xab, 0x55, 0xaa, 0xf3, 0x25, 0x55, 0xe6, 0x60, 0x5c, 0x60, 0x55, 0xda, 0x2f, 0xaf, 0x78],
+    [0xb6, 0x10, 0xab, 0x2a, 0x6a, 0x39, 0xca, 0x55, 0x40, 0x14, 0xe8, 0x63, 0x62, 0x98, 0x48, 0x57],
+    [0x93, 0xe9, 0x72, 0x7c, 0xaf, 0x86, 0x54, 0xa1, 0xce, 0xe8, 0x41, 0x11, 0x34, 0x5c, 0xcc, 0xb4],
+]
 
 
-def _bytes_to_int(byte_list):
-    """Convert a little-endian byte list to an integer."""
-    return sum((byte_list[i] & 0xFF) << (8 * i) for i in range(len(byte_list)))
+# ---------------------------------------------------------------------------
+# Variant configuration
+# ---------------------------------------------------------------------------
+
+def _variant_config(block_bits, tweak_bits, key_bytes):
+    """Return (state_bytes, tweak_bytes, ra, rb, pbox, rc, rc_prime)."""
+    state_bytes = block_bits // 8
+    tweak_bytes = tweak_bits // 8
+    if block_bits == 64:
+        pbox = PBOX_64
+        rc = ROUND_CONST_64
+        rc_prime = ROUND_CONST_PRIME_64
+    else:
+        pbox = PBOX_128
+        if key_bytes == 128:
+            rc = ROUND_CONST_128a
+            rc_prime = ROUND_CONST_PRIME_128a
+        else:
+            rc = ROUND_CONST_128A
+            rc_prime = ROUND_CONST_PRIME_128A
+    total = key_bytes // state_bytes          # a + b + 2
+    # (a, b) per variant
+    if block_bits == 64:
+        ra, rb = 2, 3
+    elif key_bytes == 128:
+        ra, rb = 3, 3
+    else:
+        ra, rb = 3, 5
+    assert ra + rb + 2 == total, (
+        f"Inconsistent key length: got {key_bytes} bytes for "
+        f"a={ra}, b={rb}, state_bytes={state_bytes}"
+    )
+    return state_bytes, tweak_bytes, ra, rb, pbox, rc, rc_prime
 
 
-def blink_toeplitz_hash(k_hash, t, n, tau):
-    r"""
-    Toeplitz hash function used in the Blink THF mode.
+# ---------------------------------------------------------------------------
+# Key schedule (ported faithfully from the reference implementation)
+# ---------------------------------------------------------------------------
 
-    This implementation follows the byte-level reference algorithm.
+def _hash_func(key, t, hk_len, state_bytes, tweak_bytes):
+    """Compute h = H(k) for a single hash function.
 
-    INPUT:
-
-    - ``k_hash`` -- integer; the hash key.
-
-    - ``t`` -- integer; the tweak value.
-
-    - ``n`` -- integer; the block size in bits.
-
-    - ``tau`` -- integer; the tweak length in bits.
-
-    OUTPUT:
-
-    Integer of ``n`` bits representing the hash value :math:`h_T(t)`.
-
-    EXAMPLES::
-
-        sage: from civerly.cipher_implementations.blink import blink_toeplitz_hash
-        sage: h = blink_toeplitz_hash(0x1234, 0x56, 8, 8)
-        sage: h
-        126
+    ``key`` and ``t`` are byte-lists (LSB-first, matching the reference),
+    ``hk_len`` is the length of the key used here (``state_bytes + tweak_bytes``).
+    Returns the hash as a list of ``state_bytes`` bytes.
     """
-    state_bytes = n // 8
-    tweak_bytes = tau // 8
-    hk_len = state_bytes + tweak_bytes
-    k_hash_bytes = _int_to_bytes(k_hash, hk_len)
-    t_bytes = _int_to_bytes(t, tweak_bytes)
     h = [0] * state_bytes
     for i in range(state_bytes - 1, -1, -1):
         h[state_bytes - 1 - i] = 0
         for l in range(8):
             temp = [0] * tweak_bytes
             for j in range(tweak_bytes):
-                left = (k_hash_bytes[tweak_bytes + i - j] << l) & 0xFF
-                right = (k_hash_bytes[tweak_bytes + i - j - 1] >> (8 - l)) & 0xFF
+                left = (key[tweak_bytes + i - j] << l) & 0xFF
+                right = (key[tweak_bytes + i - j - 1] >> (8 - l)) & 0xFF
                 temp[tweak_bytes - 1 - j] = left ^ right
             p = 0
             for j in range(tweak_bytes):
-                p ^= (t_bytes[j] & temp[j])
+                p ^= (t[j] & temp[j])
                 p &= 0xFF
-            h[state_bytes - 1 - i] ^= (_HW2[p] << l)
+            h[state_bytes - 1 - i] ^= (HW2[p] << l)
             h[state_bytes - 1 - i] &= 0xFF
-    return _bytes_to_int(h)
+    return h
 
 
-class _BlinkTHF_CVL(Component):
+def _generate_round_key(master_key, t, state_bytes, tweak_bytes, key_bytes):
+    """Port of ``BlinkCipher.generate_round_key``.
+
+    ``master_key`` and ``t`` are byte-lists (LSB-first). Returns
+    ``(rk, w, h)`` where each entry is itself a list of ``state_bytes`` bytes.
+    """
+    key_prime = [0] * key_bytes
+    for i in range(key_bytes):
+        for j in range(8):
+            bit_index = (11 * (8 * i + j)) % (key_bytes * 8)
+            byte_idx = bit_index // 8
+            bit_in_byte = bit_index % 8
+            bit_val = (master_key[byte_idx] >> bit_in_byte) & 1
+            key_prime[i] ^= (bit_val << j)
+            key_prime[i] &= 0xFF
+
+    rk = [[0] * state_bytes for _ in range(ra_rb(state_bytes, key_bytes))]
+    w = [[0] * state_bytes for _ in range(2)]
+    h = [[0] * state_bytes for _ in range(2)]
+
+    for i in range(state_bytes):
+        w[0][i] = master_key[i]
+        w[1][i] = master_key[i + state_bytes]
+        for j in range(len(rk)):
+            rk[j][i] = master_key[i + (j + 2) * state_bytes]
+
+    hk_len = state_bytes + tweak_bytes
+    hk = [[0] * hk_len for _ in range(2)]
+    for i in range(hk_len - 1, -1, -1):
+        if i > 0:
+            hk[0][i] = ((key_prime[i] << 1) ^ (key_prime[i - 1] >> 7)) & 0xFF
+            val = (key_prime[i + hk_len] << 2) & 0xFF
+            val2 = (key_prime[i + hk_len - 1] >> 6) & 0xFF
+            hk[1][i] = (val ^ val2) & 0xFF
+        else:
+            hk[0][i] = (key_prime[i] << 1) & 0xFF
+            val = (key_prime[i + hk_len] << 2) & 0xFF
+            val2 = (key_prime[i + hk_len - 1] >> 6) & 0xFF
+            hk[1][i] = ((val ^ val2) & 0xFE) & 0xFF
+
+    h[0] = _hash_func(hk[0], t, hk_len, state_bytes, tweak_bytes)
+    h[1] = _hash_func(hk[1], t, hk_len, state_bytes, tweak_bytes)
+    return rk, w, h
+
+
+def ra_rb(state_bytes, key_bytes):
+    return key_bytes // state_bytes - 2
+
+
+def _bytes_to_int(byte_list):
+    """LSB-first byte list -> integer (byte 0 is the least significant)."""
+    return sum(byte_list[i] << (8 * i) for i in range(len(byte_list)))
+
+
+# ---------------------------------------------------------------------------
+# Component construction helpers
+# ---------------------------------------------------------------------------
+
+def _mix_columns(state_bytes):
+    r"""Build the full-state MixColumn LinearLayer.
+
+    Blink stores its state *row-major* (the ``j``-th nibble of the ``r``-th
+    row is at flat index ``j + (n/16) * r``), which is the transpose of the
+    ``AESlike`` column-major convention. To avoid any confusion we do *not*
+    use the ``AESlike`` column assumption and instead build a single
+    ``LinearLayer_CVL`` spanning the whole state. Concretely, the matrix is
+    the Kronecker product ``N \otimes I_4`` where ``N`` is the nibble-wise
+    mixing matrix (``M`` applied column by column in the reference order).
+
+    CiVerLy represents state vectors MSB-first (vector index ``0`` is the
+    most significant bit of the integer), so the bit positions are placed
+    accordingly: nibble ``x`` bit ``b`` lives at vector index
+    ``total_bits - 1 - (4*x + b)``.
+    """
+    s = 4
+    cols = state_bytes // 2  # n/16 (the number of MixColumn columns)
+    state_nibbles = state_bytes * 2
+    total_bits = state_nibbles * s
+    # N[o][i] = M[r][c] when o = col + cols*r and i = col + cols*c (same col)
+    N = [[0] * state_nibbles for _ in range(state_nibbles)]
+    for col in range(cols):
+        for r in range(4):
+            o = col + cols * r
+            for c in range(4):
+                i = col + cols * c
+                N[o][i] = M_MATRIX[r][c]
+    mat = matrix(GF(2), total_bits, total_bits, 0)
+    for o in range(state_nibbles):
+        for i in range(state_nibbles):
+            if N[o][i]:
+                for b in range(s):
+                    row = total_bits - 1 - (4 * o + b)
+                    col = total_bits - 1 - (4 * i + b)
+                    mat[row, col] = 1
+    mc = LinearLayer_CVL(mat, branch_number_differential=4,
+                         branch_number_linear=4, name="MixColumns")
+    return mc
+
+
+def _inverse_perm(perm):
+    """Return the inverse permutation of ``perm``."""
+    inv = [0] * len(perm)
+    for i, p in enumerate(perm):
+        inv[p] = i
+    return inv
+
+
+def _vec_perm(pbox, state_nibbles):
+    r"""Translate Blink's paper permutation into CiVerLy's vector convention.
+
+    Blink (and its reference code) index nibbles *LSB-first* and define the
+    shuffle as ``output[i] = input[pbox[i]]``. CiVerLy vectors are *MSB-first*,
+    so a vector word ``w`` corresponds to integer nibble ``state_nibbles - 1 -
+    w``. Mapping the paper permutation through this reversal yields the
+    ``perm`` argument expected by ``PermuteLayer_CVL``.
+    """
+    N = state_nibbles
+    perm = [0] * N
+    for n in range(N):
+        perm[N - 1 - pbox[n]] = N - 1 - n
+    return perm
+
+
+# ---------------------------------------------------------------------------
+# Public cipher class
+# ---------------------------------------------------------------------------
+
+class BLINK_CVL:
     r"""
-    Internal component that evaluates the full Blink THF construction.
+    The CiVerLy implementation of the Blink tweakable block cipher family.
 
-    Not intended for direct use; it is instantiated by `BLINK64_CVL` /
-    `BLINK128_CVL` when ``k`` and ``t`` are supplied.
+    The cipher is parameterised by its block size ``n``, tweak size ``t`` and
+    the (master) ``key``. The key schedule is evaluated eagerly (using the
+    reference algorithm) and the resulting round keys, whitening keys and hash
+    values are baked into the graph as ``RoundkeyXOR_CVL`` constants, which is
+    sufficient for differential/linear trail analysis.
+
+    INPUT:
+
+        - ``n`` -- integer; Block size in bits, must be ``64`` or ``128``.
+
+        - ``t`` -- integer; Tweak size in bits, one of ``{64, 128, 256}`` for
+          ``n = 64`` and one of ``{128, 256}`` for ``n = 128``.
+
+        - ``key`` -- integer (optional); The master key. Defaults to ``0``,
+          which (for non-zero tweak) still yields a valid cipher; for trail
+          analysis the concrete value does not matter as it is a constant
+          XOR.
+
+        - ``tweak`` -- integer (optional); The tweak. Defaults to ``0``.
+
+        - ``name`` -- string (optional); Name of the cipher instance.
+
+    The test vectors below are taken from ``documentation/blink test
+    vectors.md`` (and agree with ``documentation/blink.py``)::
+
+        sage: from civerly.cipher_implementations.blink import BLINK_CVL
+        sage: from civerly.util import int_to_vec, vec_to_int
+
+        sage: key = 0xd6a102d888a467e4d1d7dec33a246943e07c1dc6f302c57e762c2df9de6f0d216dd387874a0b52ce3022e0ad78c78a0697779021b38e7fa1
+        sage: blink = BLINK_CVL(64, 64, key=key, tweak=0x0123456789abcdef)
+        sage: hex(vec_to_int(blink(int_to_vec(0, 64))))
+        '0xa4a0d10502be846e'
+
+        sage: key = 0xd6a102d888a467e4d1d7dec33a246943e07c1dc6f302c57e762c2df9de6f0d216dd387874a0b52ce3022e0ad78c78a0697779021b38e7fa1
+        sage: blink = BLINK_CVL(64, 128, key=key, tweak=0x0123456789abcdef0123456789abcdef)
+        sage: hex(vec_to_int(blink(int_to_vec(0, 64))))
+        '0x743e142f17caaae1'
+
+        sage: key = 0xd6a102d888a467e4d1d7dec33a246943e07c1dc6f302c57e762c2df9de6f0d216dd387874a0b52ce3022e0ad78c78a0697779021b38e7fa15e2b66350517f80f2961c648d578bae174d70cb769c30a45cc40300fe8a342ca57a0bd0251ae39b621b8f104904374bbd6a102e234a664e421b8f104904374bbd6a102d888a666e4
+        sage: blink = BLINK_CVL(128, 128, key=key, tweak=0x0123456789abcdef0123456789abcdef)
+        sage: hex(vec_to_int(blink(int_to_vec(0, 128))))
+        '0xb722eef350bb182074a6ff13c967a593'
+
+        sage: key = 0xd6a102d888a467e4d1d7dec33a246943e07c1dc6f302c57e762c2df9de6f0d216dd387874a0b52ce3022e0ad78c78a0697779021b38e7fa15e2b66350517f80f2961c648d578bae174d70cb769c30a45cc40300fe8a342ca57a0bd0251ae39b621b8f104904374bbd6a102e234a664e421b8f104904374bbd6a102d888a666e4
+        sage: blink = BLINK_CVL(128, 256, key=key, tweak=0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)
+        sage: hex(vec_to_int(blink(int_to_vec(0, 128))))
+        '0x20705a38e00412165bdabcac1dcbdec2'
+
+        sage: key = 0xd6a102d888a467e4d1d7dec33a246943e07c1dc6f302c57e762c2df9de6f0d216dd387874a0b52ce3022e0ad78c78a0697779021b38e7fa15e2b66350517f80f2961c648d578bae174d70cb769c30a45cc40300fe8a342ca57a0bd0251ae39b621b8f104904374bbd6a102e234a664e421b8f104904374bbd6a102d888a666e428962a4c96893eda752c17026a6395c2d6963be43b2fc10813d73f5a4a48d28d
+        sage: blink = BLINK_CVL(128, 128, key=key, tweak=0x0123456789abcdef0123456789abcdef)
+        sage: hex(vec_to_int(blink(int_to_vec(0, 128))))
+        '0x82449f141c183601195b5046eac2b026'
+
+        sage: key = 0xd6a102d888a467e4d1d7dec33a246943e07c1dc6f302c57e762c2df9de6f0d216dd387874a0b52ce3022e0ad78c78a0697779021b38e7fa15e2b66350517f80f2961c648d578bae174d70cb769c30a45cc40300fe8a342ca57a0bd0251ae39b621b8f104904374bbd6a102e234a664e421b8f104904374bbd6a102d888a666e428962a4c96893eda752c17026a6395c2d6963be43b2fc10813d73f5a4a48d28d
+        sage: blink = BLINK_CVL(128, 256, key=key, tweak=0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)
+        sage: hex(vec_to_int(blink(int_to_vec(0, 128))))
+        '0x8dc41b223bc8cd9923b1297dd27583fc'
+
+    The graph contains only explicitly named components::
+
+        sage: from civerly.cipher_implementations.blink import BLINK_CVL
+        sage: blink = BLINK_CVL(64, 64)
+        sage: for node in blink.nodes:
+        ....:     if hasattr(node, 'name'):
+        ....:         assert "Unnamed Component" not in node.name
+        ....:     if hasattr(node, 'nodes'):
+        ....:         for sub in node.nodes:
+        ....:             if hasattr(sub, 'name'):
+        ....:                 assert "Unnamed Component" not in sub.name
+        sage: blink.is_valid
+        True
+
+    Modeling the cipher with MILP (bitwise granularity, ``WordSBoxCipher``
+    base class with ``wordsize = 4`` also allows wordwise modeling)::
+
+        sage: from civerly.cipher_implementations.blink import BLINK_CVL
+        sage: from civerly.model_options import *
+        sage: import tempfile
+        sage: blink = BLINK_CVL(64, 64, name="blink-64a")
+        sage: with tempfile.TemporaryDirectory() as tmpdir:  # optional - scip
+        ....:   model_options = MODEL_OPTIONS(
+        ....:     cryptanalysis=CRYPTANALYSIS.DIFFERENTIAL,
+        ....:     optimization=OPTIMIZATION.MILP,
+        ....:     granularity=GRANULARITY.BITWISE,
+        ....:     linear_layer_modeling=LINEAR_LAYER_MODELING.MORE_DUMMIES,
+        ....:     sbox_modeling=SBOX_MODELING.CONVEX_HULL,
+        ....:     milp_solver=SCIP_CVL(),
+        ....:     path=Path(tmpdir))
+        ....:   milp = blink.model(model_options)
+        ....:   milp is not None
+        True
+
     """
 
-    _VARIANTS = {
-        "64a":  {"n": 64,  "state_bytes": 8,  "tweak_bytes": 8,  "key_bytes": 56,  "ra": 2, "rb": 3, "pbox": _BLINK_P_64},
-        "64b":  {"n": 64,  "state_bytes": 8,  "tweak_bytes": 16, "key_bytes": 56,  "ra": 2, "rb": 3, "pbox": _BLINK_P_64},
-        "128a": {"n": 128, "state_bytes": 16, "tweak_bytes": 16, "key_bytes": 128, "ra": 3, "rb": 3, "pbox": _BLINK_P_128},
-        "128b": {"n": 128, "state_bytes": 16, "tweak_bytes": 32, "key_bytes": 128, "ra": 3, "rb": 3, "pbox": _BLINK_P_128},
-        "128A": {"n": 128, "state_bytes": 16, "tweak_bytes": 16, "key_bytes": 160, "ra": 3, "rb": 5, "pbox": _BLINK_P_128},
-        "128B": {"n": 128, "state_bytes": 16, "tweak_bytes": 32, "key_bytes": 160, "ra": 3, "rb": 5, "pbox": _BLINK_P_128},
-    }
-
-    def __init__(self, variant, k, t, name="BlinkTHF"):
-        if variant not in self._VARIANTS:
-            raise ValueError(f"unsupported variant {variant!r}")
-        p = self._VARIANTS[variant]
-        self.variant = variant
-        self.n = p["n"]
-        self.state_bytes = p["state_bytes"]
-        self.tweak_bytes = p["tweak_bytes"]
-        self.key_bytes = p["key_bytes"]
-        self.ra = p["ra"]
-        self.rb = p["rb"]
-        self.pbox = p["pbox"]
-        self.state_nibbles = self.state_bytes * 2
-
-        if self.n == 64:
-            self.rc, self.rc_prime = blink_round_constants_64()
-        else:
-            self.rc, self.rc_prime = blink_round_constants_128()
-
-        # Key schedule and tweak hash
-        master_key = [(k >> (8 * i)) & 0xFF for i in range(self.key_bytes)]
-        t_bytes = [(t >> (8 * i)) & 0xFF for i in range(self.tweak_bytes)]
-        total_bits = self.key_bytes * 8
-
-        key_prime = [0] * self.key_bytes
-        for i in range(self.key_bytes):
-            for j in range(8):
-                bit_index = (11 * (8 * i + j)) % total_bits
-                byte_idx = bit_index // 8
-                bit_in_byte = bit_index % 8
-                bit_val = (master_key[byte_idx] >> bit_in_byte) & 1
-                key_prime[i] ^= (bit_val << j)
-                key_prime[i] &= 0xFF
-
-        self.w0 = [master_key[i] for i in range(self.state_bytes)]
-        self.w1 = [master_key[i + self.state_bytes] for i in range(self.state_bytes)]
-        self.rk = []
-        for j in range(self.ra + self.rb):
-            self.rk.append([master_key[i + (j + 2) * self.state_bytes] for i in range(self.state_bytes)])
-
-        hk_len = self.state_bytes + self.tweak_bytes
-        hk0 = [0] * hk_len
-        hk1 = [0] * hk_len
-        for i in range(hk_len - 1, -1, -1):
-            if i > 0:
-                hk0[i] = ((key_prime[i] << 1) ^ (key_prime[i - 1] >> 7)) & 0xFF
-                val = (key_prime[i + hk_len] << 2) & 0xFF
-                val2 = (key_prime[i + hk_len - 1] >> 6) & 0xFF
-                hk1[i] = (val ^ val2) & 0xFF
-            else:
-                hk0[i] = (key_prime[i] << 1) & 0xFF
-                val = (key_prime[i + hk_len] << 2) & 0xFF
-                val2 = (key_prime[i + hk_len - 1] >> 6) & 0xFF
-                hk1[i] = ((val ^ val2) & 0xFE) & 0xFF
-
-        self.h0 = self._hash_func(hk0, t_bytes, self.state_bytes, self.tweak_bytes)
-        self.h1 = self._hash_func(hk1, t_bytes, self.state_bytes, self.tweak_bytes)
-        self.h_xor = [self.h0[i] ^ self.h1[i] for i in range(self.state_bytes)]
-
-        super().__init__(self.n, self.n, name=name)
-
-    @staticmethod
-    def _hash_func(key, t, state_bytes, tweak_bytes):
-        h = [0] * state_bytes
-        for i in range(state_bytes - 1, -1, -1):
-            h[state_bytes - 1 - i] = 0
-            for l in range(8):
-                temp = [0] * tweak_bytes
-                for j in range(tweak_bytes):
-                    left = (key[tweak_bytes + i - j] << l) & 0xFF
-                    right = (key[tweak_bytes + i - j - 1] >> (8 - l)) & 0xFF
-                    temp[tweak_bytes - 1 - j] = left ^ right
-                p = 0
-                for j in range(tweak_bytes):
-                    p ^= (t[j] & temp[j])
-                    p &= 0xFF
-                h[state_bytes - 1 - i] ^= (_HW2[p] << l)
-                h[state_bytes - 1 - i] &= 0xFF
-        return h
-
-    def _sub_bytes(self, state):
-        for i in range(self.state_bytes):
-            hi = _BLINK_SBOX_VALUES[(state[i] >> 4) & 0xF]
-            lo = _BLINK_SBOX_VALUES[state[i] & 0xF]
-            state[i] = ((hi << 4) | lo) & 0xFF
-
-    def _mix_columns(self, state):
-        cols = self.state_nibbles // 4
-        for col in range(cols):
-            coldata = [0] * 4
-            for r in range(4):
-                idx = col + r * cols
-                byte_index = idx // 2
-                high_nibble = (idx % 2 == 1)
-                nibble = (state[byte_index] >> 4) & 0xF if high_nibble else state[byte_index] & 0xF
-                coldata[r] = nibble
-            result = [0] * 4
-            for r in range(4):
-                for c in range(4):
-                    if _M_MATRIX[r][c]:
-                        result[r] ^= coldata[c]
-            for r in range(4):
-                idx = col + r * cols
-                byte_index = idx // 2
-                high_nibble = (idx % 2 == 1)
-                if high_nibble:
-                    state[byte_index] = ((result[r] << 4) | (state[byte_index] & 0xF)) & 0xFF
-                else:
-                    state[byte_index] = (state[byte_index] & 0xF0) | result[r]
-
-    def _add_round_key(self, state, round_key):
-        for i in range(self.state_bytes):
-            state[i] ^= round_key[i]
-
-    def _add_round_constant(self, state, constant):
-        for i in range(self.state_bytes):
-            state[i] ^= constant[i]
-
-    def _permutation(self, state):
-        temp = [0] * self.state_nibbles
-        for i in range(self.state_nibbles):
-            byte_index = i // 2
-            high_nibble = (i % 2 == 1)
-            temp[i] = (state[byte_index] >> 4) & 0xF if high_nibble else state[byte_index] & 0xF
-        permuted = [0] * self.state_nibbles
-        for i in range(self.state_nibbles):
-            permuted[i] = temp[self.pbox[i]]
-        for i in range(self.state_bytes):
-            state[i] = ((permuted[2 * i + 1] << 4) | permuted[2 * i]) & 0xFF
-
-    def _inv_permutation(self, state):
-        temp = [0] * self.state_nibbles
-        for i in range(self.state_nibbles):
-            byte_index = i // 2
-            high_nibble = (i % 2 == 1)
-            temp[i] = (state[byte_index] >> 4) & 0xF if high_nibble else state[byte_index] & 0xF
-        permuted = [0] * self.state_nibbles
-        for i in range(self.state_nibbles):
-            permuted[self.pbox[i]] = temp[i]
-        for i in range(self.state_bytes):
-            state[i] = ((permuted[2 * i + 1] << 4) | permuted[2 * i]) & 0xFF
-
-    def _whitening(self, state, w):
-        for i in range(self.state_bytes):
-            state[i] ^= w[i]
-
-    def _encrypt_bytes(self, state):
-        self._whitening(state, self.w0)
-        for r in range(self.ra):
-            self._sub_bytes(state)
-            self._mix_columns(state)
-            self._add_round_key(state, self.rk[r])
-            self._add_round_constant(state, _int_to_bytes(self.rc[r], self.state_bytes))
-            self._permutation(state)
-        self._sub_bytes(state)
-        self._mix_columns(state)
-        self._add_round_key(state, self.h0)
-        self._permutation(state)
-        for r in range(self.rb):
-            self._sub_bytes(state)
-            self._mix_columns(state)
-            self._add_round_key(state, self.rk[r + self.ra])
-            self._add_round_constant(state, _int_to_bytes(self.rc[r + self.ra], self.state_bytes))
-            self._permutation(state)
-
-        self._sub_bytes(state)
-        self._mix_columns(state)
-        self._add_round_key(state, self.h_xor)
-        self._sub_bytes(state)
-
-        for r in range(self.rb):
-            self._inv_permutation(state)
-            self._add_round_constant(state, _int_to_bytes(self.rc_prime[r], self.state_bytes))
-            self._add_round_key(state, self.rk[r])
-            self._mix_columns(state)
-            self._sub_bytes(state)
-        self._inv_permutation(state)
-        self._add_round_key(state, self.h1)
-        self._mix_columns(state)
-        self._sub_bytes(state)
-        for r in range(self.ra):
-            self._inv_permutation(state)
-            self._add_round_constant(state, _int_to_bytes(self.rc_prime[r + self.rb], self.state_bytes))
-            self._add_round_key(state, self.rk[r + self.rb])
-            self._mix_columns(state)
-            self._sub_bytes(state)
-        self._whitening(state, self.w1)
-
-    def eval(self, x):
-        m = vec_to_int(x)
-        state = _int_to_bytes(m, self.state_bytes)
-        self._encrypt_bytes(state)
-        c = _bytes_to_int(state)
-        return int_to_vec(c, self.n)
-
-    def _model_milp(self, model_options):
-        raise NotImplementedError("MILP modeling is not supported for the full Blink THF construction.")
-
-    def _model_sat(self, model_options):
-        raise NotImplementedError("SAT modeling is not supported for the full Blink THF construction.")
-
-
-# ----------------------------------------------------------------------
-# CiVerLy cipher classes
-# ----------------------------------------------------------------------
-class BLINK64_CVL:
-    """Implementation of the 64-bit Blink cipher in CiVerLy."""
-
-    def __init__(self, R=14, rks=None, round_constants=None, name=None,
-                 variant="64a", k=None, t=None):
-        r"""
-        Implement the 64-bit variant of Blink in CiVerLy.
-
-        INPUT:
-
-            - ``R`` -- integer; Number of rounds for SPN mode (default: 14).
-
-            - ``rks`` -- list (optional); Round key values for SPN mode.
-
-            - ``round_constants`` -- list (optional); Round constant values
-              for SPN mode (one per round).  Defaults to all zeros.
-
-            - ``name`` -- string (optional); The name of the cipher.
-
-            - ``variant`` -- string; ``"64a"`` or ``"64b"`` (default: ``"64a"``).
-
-            - ``k`` -- integer (optional); Master key for THF mode.
-
-            - ``t`` -- integer (optional); Tweak for THF mode.
-
-        When ``k`` and ``t`` are provided the full THF construction is used.
-        Otherwise the bare iterated SPN is built, exactly as before.
-
-        This cipher is "plug-and-play" usable.
-
-        TESTS:
-
-        Basic SPN-mode instantiation::
-
-            sage: from civerly.cipher_implementations.blink import BLINK64_CVL
-            sage: from civerly.util import int_to_vec, vec_to_int
-            sage: blink = BLINK64_CVL(R=2)
-            sage: plaintext = int_to_vec(0x0, 64)
-            sage: ciphertext = blink(plaintext)
-            sage: len(ciphertext)
-            64
-            sage: blink = BLINK64_CVL(R=1, rks=[0x1, 0x2])
-            sage: ciphertext = blink(int_to_vec(0x123456789abcdef, 64))
-            sage: vec_to_int(ciphertext)  # random
-            0x583d631749abdf1c
-            sage: blink = BLINK64_CVL(R=14)
-            sage: blink.is_valid
-            True
-
-        THF test vectors (Appendix F)::
-
-            sage: k_64 = 0xd6a102d888a467e4d1d7dec33a246943e07c1dc6f302c57e762c2df9de6f0d216dd387874a0b52ce3022e0ad78c78a0697779021b38e7fa1
-
-            Blink-64a::
-            sage: blink = BLINK64_CVL(variant="64a", k=k_64, t=0x0123456789abcdef)
-            sage: result = vec_to_int(blink(int_to_vec(0x0, 64)))
-            sage: result == 0xa4a0d10502be846e
-            True
-
-            Blink-64b::
-            sage: blink = BLINK64_CVL(variant="64b", k=k_64, t=0x0123456789abcdef0123456789abcdef)
-            sage: result = vec_to_int(blink(int_to_vec(0x0, 64)))
-            sage: result == 0x743e142f17caaae1
-            True
-        """
-        if k is not None and t is not None:
-            if name is None:
-                name = f"BLINK64-{variant}"
-            block_size_bits = 64
-            thf = _BlinkTHF_CVL(variant, k, t, name=name)
-            cipher = Cipher(block_size_bits, block_size_bits, name=name)
-            node = cipher.add_subcipher(thf, [(cipher.IN, (i, i)) for i in range(block_size_bits)])
-            cipher.add_output([(node, (i, i)) for i in range(block_size_bits)])
-            self.blink_cipher = cipher
-            return
-
-        # SPN mode (backward compatible)
-        if rks is None:
-            rks = [0 for _ in range(R + 1)]
-        if round_constants is None:
-            round_constants = [0 for _ in range(R)]
+    def __init__(self, n=64, t=64, key=0, tweak=0, name=None):
         if name is None:
-            name = "BLINK64"
+            name = f"Blink-{n}"
 
-        block_size_bits = 64
-        block_size_words = 16
-        wordsize = 4
+        assert n in [64, 128], f"Block size must be 64 or 128, not {n}!"
+        assert t in [64, 128, 256], f"Tweak size {t} not supported!"
 
-        sbox_values = [0x1, 0x0, 0x9, 0x3, 0x8, 0x5, 0xe, 0x7,
-                       0x4, 0x2, 0xc, 0xb, 0xa, 0xf, 0x6, 0xd]
-        sbox = SBox_CVL(SBox(sbox_values), name="SBox")
-
-        sboxlayer = WordSBoxCipher(wordsize, block_size_words, block_size_words,
-                                   name="SBoxLayer")
-        for j in range(block_size_words):
-            node = sboxlayer.add_subcipher(sbox, [(sboxlayer.IN, (j, 0))])
-            sboxlayer.add_output([(node, (0, j))])
-
-        mixcolumn = LinearLayer_CVL(_create_blink_mixcolumn_matrix(block_size_bits),
-                                    branch_number_differential=5,
-                                    branch_number_linear=5, name="MixColumn")
-
-        P = [0, 5, 11, 10, 1, 6, 4, 13, 2, 12, 9, 15, 3, 7, 14, 8]
-        P_inv = [0] * 16
-        for i in range(16):
-            P_inv[P[i]] = i
-        perm_internal = [15 - P_inv[15 - i] for i in range(16)]
-        shuffle_perm = PermuteLayer_CVL(perm_internal,
-                                        word_coarseness=wordsize, name="Shuffle")
-
-        key_add = RoundkeyXOR_CVL(block_size_bits, 0x0, name="KeyAdd")
-        rc_add = RoundkeyXOR_CVL(block_size_bits, 0x0, name="RoundConstant")
-
-        blink_round = WordSBoxCipher(wordsize, block_size_words, block_size_words,
-                                     name="blink_round")
-
-        node = blink_round.add_subcipher(sboxlayer,
-                                         [(blink_round.IN, (i, i)) for i in range(block_size_words)])
-        node = blink_round.add_subcipher(mixcolumn,
-                                         [(node, (i, i)) for i in range(block_size_words)])
-        node_key = blink_round.add_subcipher(key_add,
-                                             [(node, (i, i)) for i in range(block_size_words)])
-        node_rc = blink_round.add_subcipher(rc_add,
-                                            [(node_key, (i, i)) for i in range(block_size_words)])
-        node = blink_round.add_subcipher(shuffle_perm,
-                                         [(node_rc, (i, i)) for i in range(block_size_words)])
-        blink_round.add_output([(node, (i, i)) for i in range(block_size_words)])
-
-        blink_cipher = WordSBoxCipher(wordsize, block_size_words, block_size_words,
-                                      name=name)
-
-        cipher_node = blink_cipher.IN
-        for r in range(R):
-            blink_round.nodes[node_key].const = rks[r]
-            blink_round.nodes[node_rc].const = round_constants[r]
-            cipher_node = blink_cipher.add_subcipher(
-                blink_round, [(cipher_node, (i, i)) for i in range(block_size_words)]
-            )
-
-        cipher_node = blink_cipher.add_subcipher(
-            key_add, [(cipher_node, (i, i)) for i in range(block_size_words)]
+        state_bytes, tweak_bytes, ra, rb, pbox, rc, rc_prime = _variant_config(
+            n, t, (key.bit_length() + 7) // 8 if key else (n // 8) * (ra_rb_from_n_t(n, t) + 2)
         )
-        blink_cipher.nodes[cipher_node].const = rks[R]
 
-        blink_cipher.add_output([(cipher_node, (i, i)) for i in range(block_size_words)])
+        # Eagerly evaluate the key schedule. The reference treats the master
+        # key and tweak in LSB-first byte order.
+        key_bytes = state_bytes * (ra + rb + 2)
+        master_key = [(key >> (8 * i)) & 0xFF for i in range(key_bytes)]
+        tweak_lst = [(tweak >> (8 * i)) & 0xFF for i in range(tweak_bytes)]
+        rk, w, h = _generate_round_key(
+            master_key, tweak_lst, state_bytes, tweak_bytes, key_bytes
+        )
 
-        self.blink_cipher = blink_cipher
+        # Convert every constant to a single integer (LSB-first bytes).
+        rk_int = [_bytes_to_int(rk[r]) for r in range(ra + rb)]
+        w0_int = _bytes_to_int(w[0])
+        w1_int = _bytes_to_int(w[1])
+        h0_int = _bytes_to_int(h[0])
+        h1_int = _bytes_to_int(h[1])
+        rc_int = [_bytes_to_int(rc[r]) for r in range(ra + rb)]
+        rc_prime_int = [_bytes_to_int(rc_prime[r]) for r in range(ra + rb)]
+        h_xor_int = h0_int ^ h1_int
+
+        # ---- Build the graph ------------------------------------------------
+        # Blink works on nibbles (4-bit words). We use ``WordSBoxCipher`` with
+        # ``wordsize = 4`` so that wordwise MILP modeling stays available while
+        # avoiding the ``AESlike`` column-major / Blink row-major transpose
+        # mismatch. MixColumns is a single full-state LinearLayer.
+        state_nibbles = state_bytes * 2
+        word = 4  # nibble
+
+        cipher = WordSBoxCipher(word, state_nibbles, state_nibbles, name=name)
+
+        # SubCells: S-box applied to every nibble.
+        sbox = SBox_CVL(SBOX, name="SBox")
+        subcells = WordSBoxCipher(word, state_nibbles, state_nibbles,
+                                  name="SubCells")
+        for i in range(state_nibbles):
+            node = subcells.add_subcipher(sbox, [(subcells.IN, (i, 0))])
+            subcells.add_output([(node, (0, i))])
+
+        # MixColumns: full-state application of M (see ``_mix_columns``).
+        mixcolumns = WordSBoxCipher(word, state_nibbles, state_nibbles,
+                                    name="MixColumns")
+        mc = _mix_columns(state_bytes)
+        node = mixcolumns.add_subcipher(
+            mc, [(mixcolumns.IN, (i, i)) for i in range(state_nibbles)]
+        )
+        mixcolumns.add_output([(node, (i, i)) for i in range(state_nibbles)])
+
+        # Shuffle P and its inverse. The paper defines the shuffle as
+        # ``output[i] = input[pbox[i]]`` in LSB-first nibble order; we convert
+        # it to CiVerLy's MSB-first vector convention via ``_vec_perm``.
+        perm = PermuteLayer_CVL(
+            _vec_perm(pbox, state_nibbles), word_coarseness=word,
+            name="Permutation"
+        )
+        inv_perm = perm.inv()
+
+        # Round-key / constant XOR helper.
+        def rk_xor(const):
+            return RoundkeyXOR_CVL(state_nibbles * word, const, name="RK")
+
+        # ----- Compose the forward keyed round -----------------------------
+        fwd_round = WordSBoxCipher(word, state_nibbles, state_nibbles,
+                                   name="FwdRound")
+        node = fwd_round.add_subcipher(
+            subcells, [(fwd_round.IN, (i, i)) for i in range(state_nibbles)]
+        )
+        node = fwd_round.add_subcipher(
+            mixcolumns, [(node, (i, i)) for i in range(state_nibbles)]
+        )
+        fwd_rk = fwd_round.add_subcipher(
+            rk_xor(0), [(node, (i, i)) for i in range(state_nibbles)]
+        )
+        fwd_rc = fwd_round.add_subcipher(
+            rk_xor(0), [(fwd_rk, (i, i)) for i in range(state_nibbles)]
+        )
+        node = fwd_round.add_subcipher(
+            perm, [(fwd_rc, (i, i)) for i in range(state_nibbles)]
+        )
+        fwd_round.add_output([(node, (i, i)) for i in range(state_nibbles)])
+
+        # ----- Compose the backward (inverse) keyed round ------------------
+        bwd_round = WordSBoxCipher(word, state_nibbles, state_nibbles,
+                                   name="BwdRound")
+        node = bwd_round.add_subcipher(
+            inv_perm, [(bwd_round.IN, (i, i)) for i in range(state_nibbles)]
+        )
+        bwd_rc = bwd_round.add_subcipher(
+            rk_xor(0), [(node, (i, i)) for i in range(state_nibbles)]
+        )
+        bwd_rk = bwd_round.add_subcipher(
+            rk_xor(0), [(bwd_rc, (i, i)) for i in range(state_nibbles)]
+        )
+        node = bwd_round.add_subcipher(
+            mixcolumns, [(bwd_rk, (i, i)) for i in range(state_nibbles)]
+        )
+        node = bwd_round.add_subcipher(
+            subcells, [(node, (i, i)) for i in range(state_nibbles)]
+        )
+        bwd_round.add_output([(node, (i, i)) for i in range(state_nibbles)])
+
+        # ----- Helper: a single (S, M, AK(c)) middle stage ----------------
+        def middle_stage(cipher_parent, in_node, const, label):
+            node = cipher_parent.add_subcipher(
+                subcells, [(in_node, (i, i)) for i in range(state_nibbles)]
+            )
+            node = cipher_parent.add_subcipher(
+                mixcolumns, [(node, (i, i)) for i in range(state_nibbles)]
+            )
+            node = cipher_parent.add_subcipher(
+                rk_xor(const), [(node, (i, i)) for i in range(state_nibbles)]
+            )
+            return node
+
+        # ----- Assemble the full cipher -----------------------------------
+        node = cipher.IN
+        # initial whitening with w0
+        node = cipher.add_subcipher(
+            rk_xor(w0_int), [(node, (i, i)) for i in range(state_nibbles)]
+        )
+        # a forward keyed rounds
+        for r in range(ra):
+            node = cipher.add_subcipher(
+                fwd_round, [(node, (i, i)) for i in range(state_nibbles)]
+            )
+            cipher.nodes[node].nodes[fwd_rk].const = rk_int[r]
+            cipher.nodes[node].nodes[fwd_rc].const = rc_int[r]
+        # middle: S, M, AK(h0), P
+        node = middle_stage(cipher, node, h0_int, "h0")
+        node = cipher.add_subcipher(
+            perm, [(node, (i, i)) for i in range(state_nibbles)]
+        )
+        # b forward keyed rounds
+        for r in range(rb):
+            node = cipher.add_subcipher(
+                fwd_round, [(node, (i, i)) for i in range(state_nibbles)]
+            )
+            cipher.nodes[node].nodes[fwd_rk].const = rk_int[ra + r]
+            cipher.nodes[node].nodes[fwd_rc].const = rc_int[ra + r]
+        # middle: S, M, AK(h0^h1), S
+        node = middle_stage(cipher, node, h_xor_int, "hxor")
+        node = cipher.add_subcipher(
+            subcells, [(node, (i, i)) for i in range(state_nibbles)]
+        )
+        # b backward keyed rounds
+        for r in range(rb):
+            node = cipher.add_subcipher(
+                bwd_round, [(node, (i, i)) for i in range(state_nibbles)]
+            )
+            cipher.nodes[node].nodes[bwd_rc].const = rc_prime_int[r]
+            cipher.nodes[node].nodes[bwd_rk].const = rk_int[r]
+        # middle: P^-1, AK(h1), M, S
+        node = cipher.add_subcipher(
+            inv_perm, [(node, (i, i)) for i in range(state_nibbles)]
+        )
+        node = cipher.add_subcipher(
+            rk_xor(h1_int), [(node, (i, i)) for i in range(state_nibbles)]
+        )
+        node = cipher.add_subcipher(
+            mixcolumns, [(node, (i, i)) for i in range(state_nibbles)]
+        )
+        node = cipher.add_subcipher(
+            subcells, [(node, (i, i)) for i in range(state_nibbles)]
+        )
+        # a backward keyed rounds
+        for r in range(ra):
+            node = cipher.add_subcipher(
+                bwd_round, [(node, (i, i)) for i in range(state_nibbles)]
+            )
+            cipher.nodes[node].nodes[bwd_rc].const = rc_prime_int[rb + r]
+            cipher.nodes[node].nodes[bwd_rk].const = rk_int[rb + r]
+        # final whitening with w1
+        node = cipher.add_subcipher(
+            rk_xor(w1_int), [(node, (i, i)) for i in range(state_nibbles)]
+        )
+        cipher.add_output([(node, (i, i)) for i in range(state_nibbles)])
+
+        self.blink_cipher = cipher
 
     def __new__(cls, *args, **kwargs):
-        """Instantiate the Blink64 cipher."""
-        instance = super(BLINK64_CVL, cls).__new__(cls)
+        instance = super(BLINK_CVL, cls).__new__(cls)
         instance.__init__(*args, **kwargs)
         return instance.blink_cipher
 
 
-class BLINK128_CVL:
-    """Implementation of the 128-bit Blink cipher in CiVerLy."""
-
-    def __init__(self, R=14, rks=None, round_constants=None, name=None,
-                 variant="128a", k=None, t=None):
-        r"""
-        Implement the 128-bit variant of Blink in CiVerLy.
-
-        INPUT:
-
-            - ``R`` -- integer; Number of rounds for SPN mode (default: 14).
-
-            - ``rks`` -- list (optional); Round key values for SPN mode.
-
-            - ``round_constants`` -- list (optional); Round constant values
-              for SPN mode (one per round).  Defaults to all zeros.
-
-            - ``name`` -- string (optional); The name of the cipher.
-
-            - ``variant`` -- string; one of ``"128a"``, ``"128b"``,
-              ``"128A"``, ``"128B"`` (default: ``"128a"``).
-
-            - ``k`` -- integer (optional); Master key for THF mode.
-
-            - ``t`` -- integer (optional); Tweak for THF mode.
-
-        When ``k`` and ``t`` are provided the full THF construction is used.
-        Otherwise the bare iterated SPN is built, exactly as before.
-
-        This cipher is "plug-and-play" usable.
-
-        TESTS:
-
-        Basic SPN-mode instantiation::
-
-            sage: from civerly.cipher_implementations.blink import BLINK128_CVL
-            sage: from civerly.util import int_to_vec, vec_to_int
-            sage: blink = BLINK128_CVL(R=2)
-            sage: plaintext = int_to_vec(0x0, 128)
-            sage: ciphertext = blink(plaintext)
-            sage: len(ciphertext)
-            128
-            sage: blink = BLINK128_CVL(R=3, rks=[0, 0xffffffffffffffff, 0, 0])
-            sage: ciphertext = blink(int_to_vec(0x123456789abcdef, 128))  # pad with zeros
-            sage: len(ciphertext)
-            128
-            sage: blink = BLINK128_CVL(R=14)
-            sage: blink.is_valid
-            True
-
-        THF test vectors (Appendix F)::
-
-            sage: k_128 = 0xd6a102d888a467e4d1d7dec33a246943e07c1dc6f302c57e762c2df9de6f0d216dd387874a0b52ce3022e0ad78c78a0697779021b38e7fa15e2b66350517f80f2961c648d578bae174d70cb769c30a45cc40300fe8a342ca57a0bd0251ae39b621b8f104904374bbd6a102e234a664e421b8f104904374bbd6a102d888a666e4
-            sage: k_128A = 0xd6a102d888a467e4d1d7dec33a246943e07c1dc6f302c57e762c2df9de6f0d216dd387874a0b52ce3022e0ad78c78a0697779021b38e7fa15e2b66350517f80f2961c648d578bae174d70cb769c30a45cc40300fe8a342ca57a0bd0251ae39b621b8f104904374bbd6a102e234a664e421b8f104904374bbd6a102d888a666e428962a4c96893eda752c17026a6395c2d6963be43b2fc10813d73f5a4a48d28d
-
-            Blink-128a::
-            sage: blink = BLINK128_CVL(variant="128a", k=k_128, t=0x0123456789abcdef0123456789abcdef)
-            sage: result = vec_to_int(blink(int_to_vec(0x0, 128)))
-            sage: result == 0xb722eef350bb182074a6ff13c967a593
-            True
-
-            Blink-128b::
-            sage: blink = BLINK128_CVL(variant="128b", k=k_128, t=0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)
-            sage: result = vec_to_int(blink(int_to_vec(0x0, 128)))
-            sage: result == 0x20705a38e00412165bdabcac1dcbdec2
-            True
-
-            Blink-128A::
-            sage: blink = BLINK128_CVL(variant="128A", k=k_128A, t=0x0123456789abcdef0123456789abcdef)
-            sage: result = vec_to_int(blink(int_to_vec(0x0, 128)))
-            sage: result == 0x82449f141c183601195b5046eac2b026
-            True
-
-            Blink-128B::
-            sage: blink = BLINK128_CVL(variant="128B", k=k_128A, t=0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)
-            sage: result = vec_to_int(blink(int_to_vec(0x0, 128)))
-            sage: result == 0x8dc41b223bc8cd9923b1297dd27583fc
-            True
-        """
-        if k is not None and t is not None:
-            if name is None:
-                name = f"BLINK128-{variant}"
-            block_size_bits = 128
-            thf = _BlinkTHF_CVL(variant, k, t, name=name)
-            cipher = Cipher(block_size_bits, block_size_bits, name=name)
-            node = cipher.add_subcipher(thf, [(cipher.IN, (i, i)) for i in range(block_size_bits)])
-            cipher.add_output([(node, (i, i)) for i in range(block_size_bits)])
-            self.blink_cipher = cipher
-            return
-
-        # SPN mode (backward compatible)
-        if rks is None:
-            rks = [0 for _ in range(R + 1)]
-        if round_constants is None:
-            round_constants = [0 for _ in range(R)]
-        if name is None:
-            name = "BLINK128"
-
-        block_size_bits = 128
-        block_size_words = 32
-        wordsize = 4
-
-        sbox_values = [0x1, 0x0, 0x9, 0x3, 0x8, 0x5, 0xe, 0x7,
-                       0x4, 0x2, 0xc, 0xb, 0xa, 0xf, 0x6, 0xd]
-        sbox = SBox_CVL(SBox(sbox_values), name="SBox")
-
-        sboxlayer = WordSBoxCipher(wordsize, block_size_words, block_size_words,
-                                   name="SBoxLayer")
-        for j in range(block_size_words):
-            node = sboxlayer.add_subcipher(sbox, [(sboxlayer.IN, (j, 0))])
-            sboxlayer.add_output([(node, (0, j))])
-
-        mixcolumn = LinearLayer_CVL(_create_blink_mixcolumn_matrix(block_size_bits),
-                                    branch_number_differential=5,
-                                    branch_number_linear=5, name="MixColumn")
-
-        P = [5, 12, 4, 1, 17, 9, 10, 16, 28, 14, 21, 22, 11, 27, 8, 13,
-             2, 25, 18, 3, 30, 6, 19, 20, 0, 23, 24, 31, 7, 15, 29, 26]
-        P_inv = [0] * 32
-        for i in range(32):
-            P_inv[P[i]] = i
-        perm_internal = [31 - P_inv[31 - i] for i in range(32)]
-        shuffle_perm = PermuteLayer_CVL(perm_internal,
-                                        word_coarseness=wordsize, name="Shuffle")
-
-        key_add = RoundkeyXOR_CVL(block_size_bits, 0x0, name="KeyAdd")
-        rc_add = RoundkeyXOR_CVL(block_size_bits, 0x0, name="RoundConstant")
-
-        blink_round = WordSBoxCipher(wordsize, block_size_words, block_size_words,
-                                     name="blink_round")
-
-        node = blink_round.add_subcipher(sboxlayer,
-                                         [(blink_round.IN, (i, i)) for i in range(block_size_words)])
-        node = blink_round.add_subcipher(mixcolumn,
-                                         [(node, (i, i)) for i in range(block_size_words)])
-        node_key = blink_round.add_subcipher(key_add,
-                                             [(node, (i, i)) for i in range(block_size_words)])
-        node_rc = blink_round.add_subcipher(rc_add,
-                                            [(node_key, (i, i)) for i in range(block_size_words)])
-        node = blink_round.add_subcipher(shuffle_perm,
-                                         [(node_rc, (i, i)) for i in range(block_size_words)])
-        blink_round.add_output([(node, (i, i)) for i in range(block_size_words)])
-
-        blink_cipher = WordSBoxCipher(wordsize, block_size_words, block_size_words,
-                                      name=name)
-
-        cipher_node = blink_cipher.IN
-        for r in range(R):
-            blink_round.nodes[node_key].const = rks[r]
-            blink_round.nodes[node_rc].const = round_constants[r]
-            cipher_node = blink_cipher.add_subcipher(
-                blink_round, [(cipher_node, (i, i)) for i in range(block_size_words)]
-            )
-
-        cipher_node = blink_cipher.add_subcipher(
-            key_add, [(cipher_node, (i, i)) for i in range(block_size_words)]
-        )
-        blink_cipher.nodes[cipher_node].const = rks[R]
-
-        blink_cipher.add_output([(cipher_node, (i, i)) for i in range(block_size_words)])
-
-        self.blink_cipher = blink_cipher
-
-    def __new__(cls, *args, **kwargs):
-        r"""
-        Instantiate the Blink128 cipher.
-
-        TESTS::
-
-            sage: from civerly.cipher_implementations.blink import BLINK128_CVL
-            sage: blink = BLINK128_CVL(R=2)  # default instantiation
-            sage: blink.is_valid
-            True
-        """
-        instance = super(BLINK128_CVL, cls).__new__(cls)
-        instance.__init__(*args, **kwargs)
-        return instance.blink_cipher
+def ra_rb_from_n_t(n, t):
+    """Infer ``ra + rb`` from block/tweak sizes for the default key length."""
+    if n == 64:
+        return 5
+    if t == 128:
+        return 6
+    return 8
