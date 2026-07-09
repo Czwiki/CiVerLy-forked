@@ -681,6 +681,51 @@ class QALQAN_CVL:
         sage: ct == bytes.fromhex("a0bd09204c21be13bb21839fc44ebf21")
         True
 
+    When ``R`` is smaller than the natural number of rounds for the key,
+    the cipher consists of the first ``R`` rounds (initial whitening
+    followed by ``R-1`` middle rounds with modular addition).  The special
+    final-round XOR only occurs when ``R`` equals the full round count::
+
+        sage: from civerly.cipher_implementations.qalqan import QALQAN_CVL
+        sage: from civerly.util import int_to_vec, vec_to_int
+        sage: rks_256bit = [
+        ....:   0xdefc7d5097fc5b4689062b14bf944ca7,
+        ....:   0x8f1410afec58fe73097f040930ca62f6,
+        ....:   0x59b8d4f39153592d2c56419489e0ce9b,
+        ....:   0x0598037b4d5fcdb61635965522839d7e,
+        ....:   0xb6055ccf4068bbe604492238af11eee5,
+        ....:   0xe4e5094f3ac1cea4d3557f423ce63b35,
+        ....:   0x8aa4d21af28fd0544367d5b84ef07df6,
+        ....:   0xb5ac1862e625a49acbf1d2d449f91c12,
+        ....:   0x3187eb20d862bdf7eaf3a9ffe386f9d6,
+        ....:   0x70edf6d9f0b2656e6cca9d7fc56b4271,
+        ....:   0x78b0ef25aad592d0855c3ca0ce662d9b,
+        ....:   0x93740497be2691c96dd4c0b8c66ad3cb,
+        ....:   0x5a683593815984db2f7cfd83be31e644,
+        ....:   0xe620e4e968e60d7b82c52c6a8bb42528,
+        ....:   0xc000c8821b4f395633853905f669f412,
+        ....:   0x71a9ec88e71db98432ec33a8e34cdd0e,
+        ....:   0x02e4f4854d340fc17b1b87cee1f66973,
+        ....: ]
+        sage: pt = bytes(range(16))
+        sage: ct_full = vec_to_int(QALQAN_CVL(rks=rks_256bit)(
+        ....:     int_to_vec(int.from_bytes(pt, "big"), 128)
+        ....:   )).to_bytes(16, "big")
+        sage: ct_full == bytes.fromhex("591ff38813c1885c28a848197115bdbf")
+        True
+        sage: ct_trunc = vec_to_int(QALQAN_CVL(R=4, rks=rks_256bit)(
+        ....:     int_to_vec(int.from_bytes(pt, "big"), 128)
+        ....:   )).to_bytes(16, "big")
+        sage: ct_trunc == bytes.fromhex("bbd0bb4f5781c50af40c41028bae0a74")
+        True
+        sage: ct_explicit = vec_to_int(QALQAN_CVL(R=4, rks=rks_256bit[:4])(
+        ....:     int_to_vec(int.from_bytes(pt, "big"), 128)
+        ....:   )).to_bytes(16, "big")
+        sage: ct_trunc == ct_explicit
+        False
+        sage: ct_trunc == ct_full
+        False
+
     Differential trail search (requires an external SAT solver and the
     Espresso logic minimizer)::
 
@@ -741,10 +786,21 @@ class QALQAN_CVL:
                 "(key bytes) must be provided."
             )
 
+        # natural number of rounds for the supplied key / key schedule
+        if key is not None:
+            full_rounds = _rounds_for_key(len(_normalize_key(key)))
+        else:
+            full_rounds = len(rks)
+
         if R is None:
             R = len(rks)
         else:
-            assert len(rks) == R, f"len(rks)={len(rks)} must equal R={R}"
+            if len(rks) > R:
+                rks = rks[:R]
+            elif len(rks) < R:
+                raise ValueError(
+                    f"Not enough round keys: got {len(rks)}, need {R}."
+                )
 
         assert R >= 2, "Qalqan needs at least 2 rounds."
 
@@ -877,13 +933,17 @@ class QALQAN_CVL:
             add128_in_round.nodes[rk_node].const = _byte_rev_int(rks[r])
             node = cipher.add_subcipher(round_fn, [(node, (i, i)) for i in range(128)])
 
-        # final round: S, L (no key addition)
-        node = cipher.add_subcipher(sbox_cipher, [(node, (i, i)) for i in range(128)])
-        node = cipher.add_subcipher(l_cipher, [(node, (i, i)) for i in range(128)])
-
-        # final key whitening (XOR)
-        kw_fin = RoundkeyXOR_CVL(128, rks[R - 1], name="KeyAdd_fin")
-        node = cipher.add_subcipher(kw_fin, [(node, (i, i)) for i in range(128)])
+        # last round of the requested R rounds
+        if R == full_rounds:
+            # final round of the full cipher: S, L, XOR whitening
+            node = cipher.add_subcipher(sbox_cipher, [(node, (i, i)) for i in range(128)])
+            node = cipher.add_subcipher(l_cipher, [(node, (i, i)) for i in range(128)])
+            kw_fin = RoundkeyXOR_CVL(128, rks[R - 1], name="KeyAdd_fin")
+            node = cipher.add_subcipher(kw_fin, [(node, (i, i)) for i in range(128)])
+        else:
+            # truncated cipher: round R-1 is a middle round (S, L, Add128)
+            add128_in_round.nodes[rk_node].const = _byte_rev_int(rks[R - 1])
+            node = cipher.add_subcipher(round_fn, [(node, (i, i)) for i in range(128)])
 
         cipher.add_output([(node, (i, i)) for i in range(128)])
 
