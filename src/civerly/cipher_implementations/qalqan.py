@@ -355,15 +355,30 @@ def _reference_round_keys(key):
     import importlib.util
     from pathlib import Path
 
-    path = (
-        Path(__file__).parent.parent.parent.parent
-        / "documentation"
-        / "qalqan.py"
+    search_roots = {
+        Path(__file__).parent.parent.parent.parent,
+    }
+    cur = Path.cwd()
+    for _ in range(8):
+        search_roots.add(cur)
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+
+    for root in search_roots:
+        path = root / "documentation" / "qalqan.py"
+        if path.exists():
+            spec = importlib.util.spec_from_file_location("qalqan_reference", str(path))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module.KeyScheduler(key).expand()
+
+    raise FileNotFoundError(
+        "Cannot locate documentation/qalqan.py. "
+        "Run from the Qalqan source tree or ensure the reference "
+        "implementation is available."
     )
-    spec = importlib.util.spec_from_file_location("qalqan_reference", str(path))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.KeyScheduler(key).expand()
 
 
 class QALQAN_CVL:
@@ -397,73 +412,167 @@ class QALQAN_CVL:
 
     EXAMPLES:
 
-    Basic encryption, compared against the reference implementation
-    (``documentation/qalqan.py``).  Because no official test vectors exist,
-    this is the canonical correctness check::
+    Basic encryption with a 256-bit key against a pre-computed known vector::
 
         sage: from civerly.cipher_implementations.qalqan import QALQAN_CVL
         sage: from civerly.util import int_to_vec, vec_to_int
-        sage: import sys, os
-        sage: import civerly.cipher_implementations.qalqan as _qalqan_mod
-        sage: sys.path.insert(0, os.path.join(os.path.dirname(_qalqan_mod.__file__), "..", "..", "..", "documentation"))
-        sage: import qalqan
-        sage: key = bytes(range(32))                          # 256-bit key
-        sage: pt  = bytes(range(16))                          # plaintext
-        sage: ct_ref = qalqan.encrypt_block(pt, key)
-        sage: cipher = QALQAN_CVL(key=key)
-        sage: ct_vec = cipher(int_to_vec(int.from_bytes(pt, "big"), 128))
-        sage: ct = vec_to_int(ct_vec).to_bytes(16, "big")
-        sage: ct == ct_ref
+        sage: rks = [
+        ....:   0xdefc7d5097fc5b4689062b14bf944ca7,
+        ....:   0x8f1410afec58fe73097f040930ca62f6,
+        ....:   0x59b8d4f39153592d2c56419489e0ce9b,
+        ....:   0x0598037b4d5fcdb61635965522839d7e,
+        ....:   0xb6055ccf4068bbe604492238af11eee5,
+        ....:   0xe4e5094f3ac1cea4d3557f423ce63b35,
+        ....:   0x8aa4d21af28fd0544367d5b84ef07df6,
+        ....:   0xb5ac1862e625a49acbf1d2d449f91c12,
+        ....:   0x3187eb20d862bdf7eaf3a9ffe386f9d6,
+        ....:   0x70edf6d9f0b2656e6cca9d7fc56b4271,
+        ....:   0x78b0ef25aad592d0855c3ca0ce662d9b,
+        ....:   0x93740497be2691c96dd4c0b8c66ad3cb,
+        ....:   0x5a683593815984db2f7cfd83be31e644,
+        ....:   0xe620e4e968e60d7b82c52c6a8bb42528,
+        ....:   0xc000c8821b4f395633853905f669f412,
+        ....:   0x71a9ec88e71db98432ec33a8e34cdd0e,
+        ....:   0x02e4f4854d340fc17b1b87cee1f66973,
+        ....: ]
+        sage: pt = bytes(range(16))
+        sage: ct = vec_to_int(QALQAN_CVL(rks=rks)(
+        ....:     int_to_vec(int.from_bytes(pt, "big"), 128)
+        ....:   )).to_bytes(16, "big")
+        sage: ct == bytes.fromhex("591ff38813c1885c28a848197115bdbf")
         True
 
-    A second, longer key (384 bit) also matches the reference::
+    A second, longer key (384 bit) also matches a known vector::
 
         sage: from civerly.cipher_implementations.qalqan import QALQAN_CVL
         sage: from civerly.util import int_to_vec, vec_to_int
-        sage: import sys, os
-        sage: import civerly.cipher_implementations.qalqan as _qalqan_mod
-        sage: sys.path.insert(0, os.path.join(os.path.dirname(_qalqan_mod.__file__), "..", "..", "..", "documentation"))
-        sage: import qalqan
-        sage: key = bytes(range(48))
-        sage: pt  = bytes(range(1, 17))
-        sage: ct_ref = qalqan.encrypt_block(pt, key)
-        sage: ct_vec = QALQAN_CVL(key=key)(int_to_vec(int.from_bytes(pt, "big"), 128))
-        sage: vec_to_int(ct_vec).to_bytes(16, "big") == ct_ref
+        sage: rks = [
+        ....:   0x78a85a037a8bac1d0533335b5842596a,
+        ....:   0x49dba62af577d7e6fe40915c6cc43d0d,
+        ....:   0x6a997f65fd6823f2017d00e9da410f3b,
+        ....:   0xb3f4570d58114114ede215a407af2f90,
+        ....:   0xefebf52a7df5d3b14fba863bd582d5df,
+        ....:   0x5ece47c5ee89dfb1d61c959065ae4d17,
+        ....:   0xc54ae3ec3552a2fca469d61a9934ea3e,
+        ....:   0x1a485a8851b4547edaa5503c7eca6d4d,
+        ....:   0x02cb8c91b38578e383f5abd40947aa05,
+        ....:   0x0be2c3da40f029b4f037e6f2a5cc3318,
+        ....:   0xb94dbf919cd8133706b7c3f53b34f5de,
+        ....:   0xff89cdb2869afcf16f57fabf55045a1b,
+        ....:   0x7c86318a44e29be1202d3a59bdbdd58b,
+        ....:   0xf7cec222625342c56a765312d151c23a,
+        ....:   0x5acbbda287cc96425c6a884a273b6deb,
+        ....:   0xae8c91ceca364c0c91de38c972a8b871,
+        ....:   0x1d65731cca4cc11ecc663a4e6bd6f2c6,
+        ....:   0xc4218cf8d363824e9ca8fbad760cb1f3,
+        ....:   0xaf84d0d8e81a73cc22aec5a54ca11442,
+        ....: ]
+        sage: pt = bytes(range(1, 17))
+        sage: ct = vec_to_int(QALQAN_CVL(rks=rks)(
+        ....:     int_to_vec(int.from_bytes(pt, "big"), 128)
+        ....:   )).to_bytes(16, "big")
+        sage: ct == bytes.fromhex("3277c91928ae15376f3d0c56688d1b6a")
         True
 
-    Providing round keys explicitly (as integers) gives the same result::
+    Providing round keys explicitly (as integers) matches the known vector::
 
         sage: from civerly.cipher_implementations.qalqan import QALQAN_CVL
         sage: from civerly.util import int_to_vec, vec_to_int
-        sage: import sys, os
-        sage: import civerly.cipher_implementations.qalqan as _qalqan_mod
-        sage: sys.path.insert(0, os.path.join(os.path.dirname(_qalqan_mod.__file__), "..", "..", "..", "documentation"))
-        sage: import qalqan
-        sage: key = bytes(range(32))
-        sage: rks = [int.from_bytes(rk, "big") for rk in qalqan.KeyScheduler(key).expand()]
-        sage: ct_ref = qalqan.encrypt_block(bytes(range(16)), key)
-        sage: ct_vec = QALQAN_CVL(rks=rks)(int_to_vec(int.from_bytes(bytes(range(16)), "big"), 128))
-        sage: vec_to_int(ct_vec).to_bytes(16, "big") == ct_ref
+        sage: rks = [
+        ....:   0xdefc7d5097fc5b4689062b14bf944ca7,
+        ....:   0x8f1410afec58fe73097f040930ca62f6,
+        ....:   0x59b8d4f39153592d2c56419489e0ce9b,
+        ....:   0x0598037b4d5fcdb61635965522839d7e,
+        ....:   0xb6055ccf4068bbe604492238af11eee5,
+        ....:   0xe4e5094f3ac1cea4d3557f423ce63b35,
+        ....:   0x8aa4d21af28fd0544367d5b84ef07df6,
+        ....:   0xb5ac1862e625a49acbf1d2d449f91c12,
+        ....:   0x3187eb20d862bdf7eaf3a9ffe386f9d6,
+        ....:   0x70edf6d9f0b2656e6cca9d7fc56b4271,
+        ....:   0x78b0ef25aad592d0855c3ca0ce662d9b,
+        ....:   0x93740497be2691c96dd4c0b8c66ad3cb,
+        ....:   0x5a683593815984db2f7cfd83be31e644,
+        ....:   0xe620e4e968e60d7b82c52c6a8bb42528,
+        ....:   0xc000c8821b4f395633853905f669f412,
+        ....:   0x71a9ec88e71db98432ec33a8e34cdd0e,
+        ....:   0x02e4f4854d340fc17b1b87cee1f66973,
+        ....: ]
+        sage: pt = bytes(range(16))
+        sage: ct = vec_to_int(QALQAN_CVL(rks=rks)(
+        ....:     int_to_vec(int.from_bytes(pt, "big"), 128)
+        ....:   )).to_bytes(16, "big")
+        sage: ct == bytes.fromhex("591ff38813c1885c28a848197115bdbf")
         True
 
-    A random round-trip check against the reference implementation::
+    Known vectors for longer keys (512-bit and 1024-bit) also match::
 
         sage: from civerly.cipher_implementations.qalqan import QALQAN_CVL
         sage: from civerly.util import int_to_vec, vec_to_int
-        sage: import sys, os
-        sage: import civerly.cipher_implementations.qalqan as _qalqan_mod
-        sage: sys.path.insert(0, os.path.join(os.path.dirname(_qalqan_mod.__file__), "..", "..", "..", "documentation"))
-        sage: import qalqan
-        sage: ok = True
-        sage: for _ in range(10):
-        ....:     key = os.urandom(32)
-        ....:     pt  = os.urandom(16)
-        ....:     ct_ref = qalqan.encrypt_block(pt, key)
-        ....:     ct = vec_to_int(QALQAN_CVL(key=key)(
-        ....:         int_to_vec(int.from_bytes(pt, "big"), 128)
-        ....:     )).to_bytes(16, "big")
-        ....:     ok = ok and (ct == ct_ref)
-        sage: ok
+        sage: rks_512 = [
+        ....:   0x78a85a037a8bac2d45ce9c56dbe295a8,
+        ....:   0x27565f5c3cc8b962c147028195c7d7a3,
+        ....:   0xdd317fc57cf3dcfe1294bfb4f14b0fd0,
+        ....:   0xd7d7af56a45a08dccfd6ebede2fbf1d3,
+        ....:   0x9681b8bb4d4dc589c9c9e95d60aeb6bd,
+        ....:   0xd3f2567d352d0ec1e33d83deca94e8d4,
+        ....:   0x523bac839605f6f6d4edac47e335b758,
+        ....:   0xb45e63d13e4d95f7387dd983f7e60590,
+        ....:   0x148bb97f63df218014951085f8d147f6,
+        ....:   0xd17e1f188ffd1e2f3d2b756a7c641059,
+        ....:   0xfee441463c69f5c1b56c85400a7fc280,
+        ....:   0x6f05e3be10e17c4757d56e2246a8eb06,
+        ....:   0x15728dea8fb5f0c6e010d4f2066d906a,
+        ....:   0xc583de7d1d6c9fccfde45f85739257c3,
+        ....:   0x668d40c8314fb8342fc91f7377fd07f8,
+        ....:   0x314d9a24a0646e6f0c6fae5bf5ede792,
+        ....:   0x15b8a376acd098ab099b3bcfbed94517,
+        ....:   0x94b831d724a2a361f41b7e10440d3565,
+        ....:   0x87a593161961b02a395d8587bfc47ad2,
+        ....:   0xcb6b78191fa727794a5be2397a583441,
+        ....:   0x63fedb79d2dabfe91c01b52724821bdc,
+        ....: ]
+        sage: pt = bytes(range(16))
+        sage: ct = vec_to_int(QALQAN_CVL(rks=rks_512)(
+        ....:     int_to_vec(int.from_bytes(pt, "big"), 128)
+        ....:   )).to_bytes(16, "big")
+        sage: ct == bytes.fromhex("bed5375922d304e26a33d364185e697c")
+        True
+
+        sage: rks_1024 = [
+        ....:   0x78a85a037a8bac2d45ce9c56dbe295c8,
+        ....:   0xa5ca283e6d70a5566ef1b0bee9560b86,
+        ....:   0x59c2740f257d2eee64bf9eb632b82808,
+        ....:   0x5e2a37e9f6699f4735a453bf6169fa8b,
+        ....:   0x25daaab7f13a4a84abfddc6ba750c948,
+        ....:   0xe61a5c5f0d37231e81e94a98c70a8f86,
+        ....:   0x741bc8645825476eeaffb347f7d76ea8,
+        ....:   0x54d0908f6294ae20463b3847534f16cd,
+        ....:   0xbf5d76184a50e70486aa4c8344d5ec5f,
+        ....:   0x38fa911e432e0b9b8dd8ca5fdd0ec189,
+        ....:   0x0f02776331aef13fbfa9defe4fc3e84b,
+        ....:   0x144913ae90e2dff64345c80bd1a3c26f,
+        ....:   0x6ca2e0e11ddf1c42f9f7466882658c08,
+        ....:   0xe89206eb853b5543cf86be1dc0046fa8,
+        ....:   0xcd60c34e29d226b6feaecdf5250b0a1a,
+        ....:   0x0504438c11bbee1d3a8d9a0ba3f7d383,
+        ....:   0xcc8d82343fdfa479897631da5e2b090d,
+        ....:   0xfe471b87e80708b612a371f9d63cfc46,
+        ....:   0x374669bcb42acb5ac69343a053b79568,
+        ....:   0x9b9c11bc3151ec39f036ff29aa4f66b6,
+        ....:   0x12f7f39153fde1d555195f0e1831607b,
+        ....:   0xbabed214c94ecc373d3625c845f99729,
+        ....:   0xd0f5f131c56f9464ab9f7f2ebe779813,
+        ....:   0x98b05cc7bb0726bf5885cd200aa809ee,
+        ....:   0x4be87b0900bc4067640c848e659dda21,
+        ....:   0xa3b00bbcdc41670b00505ded37a2f214,
+        ....:   0x2a86308474fae27c54c6d6b5d7c5a41a,
+        ....:   0x25272e333381ec19448b67d2b3e20b84,
+        ....:   0xde96579ca87373bcc1afa50bf7a9dffc,
+        ....: ]
+        sage: ct = vec_to_int(QALQAN_CVL(rks=rks_1024)(
+        ....:     int_to_vec(int.from_bytes(pt, "big"), 128)
+        ....:   )).to_bytes(16, "big")
+        sage: ct == bytes.fromhex("a0bd09204c21be13bb21839fc44ebf21")
         True
 
     Differential trail search (requires an external SAT solver and the
