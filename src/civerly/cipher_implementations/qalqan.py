@@ -28,10 +28,11 @@ Encryption (matching ``documentation/qalqan.py::encrypt_block``)::
     state = K_fin_xor(state)                          # round key N-1, XOR
 
 The round keys are taken from the reconstructed key schedule
-(``documentation/qalqan.py::KeyScheduler``), which is the same source used
-to generate the test vectors below.  Because no official test vectors for
+(:func:`_qalqan_round_keys`), which is ported directly into this module so
+the implementation is fully self-contained.  It is the same source used to
+generate the test vectors below.  Because no official test vectors for
 Qalqan are publicly available, the doctests compare the CiVerLy model
-against that reference implementation.
+against that reconstructed implementation.
 
 Modeling notes
 --------------
@@ -338,47 +339,152 @@ def _byte_rev_int(x):
     return int.from_bytes(x.to_bytes(16, "big"), "little")
 
 
-def _rounds_for_key(key):
-    r"""Return ``N = 17 + floor((KLen - 256) / 128) * 2`` for a ``key``."""
-    bits = len(key) * 8
+def _rounds_for_key(key_len):
+    r"""
+    Return ``N = 17 + floor((KLen - 256) / 128) * 2`` for a key of ``key_len``
+    bytes.
+    """
+    bits = key_len * 8
     return 17 + ((bits - 256) // 128) * 2
 
 
-def _reference_round_keys(key):
+def _normalize_key(key):
     r"""
-    Generate the Qalqan round keys from ``key`` using the reference
-    implementation in ``documentation/qalqan.py``.
+    Coerce ``key`` (``bytes`` or an integer, e.g. a Sage ``Integer``) into the
+    ``bytes`` form expected by the key schedule.
 
-    This keeps the CiVerLy test vectors consistent with the only available
-    reference implementation (no official test vectors exist for Qalqan).
+    An integer key is interpreted big-endian and padded to the minimum valid
+    Qalqan key length of 256 bit (32 bytes).
     """
-    import importlib.util
-    from pathlib import Path
+    if isinstance(key, (bytes, bytearray)):
+        return bytes(key)
+    if isinstance(key, int):
+        k = key
+    else:
+        k = int(key)
+    length = max(32, (k.bit_length() + 7) // 8)
+    return k.to_bytes(length, "big")
 
-    search_roots = {
-        Path(__file__).parent.parent.parent.parent,
-    }
-    cur = Path.cwd()
-    for _ in range(8):
-        search_roots.add(cur)
-        parent = cur.parent
-        if parent == cur:
-            break
-        cur = parent
 
-    for root in search_roots:
-        path = root / "documentation" / "qalqan.py"
-        if path.exists():
-            spec = importlib.util.spec_from_file_location("qalqan_reference", str(path))
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            return module.KeyScheduler(key).expand()
+def _check_key(key):
+    r"""
+    Validate a Qalqan key (256..1024 bit, in 128-bit steps).
 
-    raise FileNotFoundError(
-        "Cannot locate documentation/qalqan.py. "
-        "Run from the Qalqan source tree or ensure the reference "
-        "implementation is available."
-    )
+    Mirrors ``documentation/qalqan.py::check_key`` (ported here so the
+    implementation is self-contained).
+    """
+    if len(key) < 32:
+        raise ValueError("Key too short.")
+    if len(key) > 128:
+        raise ValueError("Key too long.")
+    if (len(key) - 32) % 16:
+        raise ValueError("Key length must increase in 128-bit steps.")
+
+
+def _qalqan_round_keys(key, rounds=None):
+    r"""
+    Generate the Qalqan round keys from ``key``.
+
+    This is a self-contained re-implementation of the reconstructed key
+    schedule originally found in ``documentation/qalqan.py::KeyScheduler``.
+    It is ported directly into this module so the CiVerLy implementation no
+    longer depends on the external reference file.  No official test vectors
+    for Qalqan exist, so this reconstruction is what the CiVerLy test vectors
+    are verified against.
+
+    INPUT:
+
+        - ``key`` -- bytes or integer; the encryption key (256..1024 bit, in
+          128-bit steps).  An integer key is interpreted big-endian and padded
+          to 256 bit.
+
+        - ``rounds`` -- integer (optional); the number of round keys to
+          produce.  If omitted, it is derived from the key length
+          (``17 + floor((KLen-256)/128)*2``).
+
+    OUTPUT: A list of ``rounds`` round keys as 16-byte ``bytes`` objects.
+
+    EXAMPLES:
+
+        sage: from civerly.cipher_implementations.qalqan import _qalqan_round_keys
+        sage: rks = _qalqan_round_keys(bytes(range(32)))
+        sage: len(rks)
+        17
+        sage: all(len(rk) == 16 for rk in rks)
+        True
+
+    An integer key is accepted (here a 256-bit zero key yields 17 rounds)::
+
+        sage: rks = _qalqan_round_keys(0)
+        sage: len(rks)
+        17
+
+    The number of round keys can be requested explicitly::
+
+        sage: len(_qalqan_round_keys(0, rounds=3))
+        3
+    """
+    key = _normalize_key(key)
+    _check_key(key)
+
+    if rounds is None:
+        rounds = _rounds_for_key(len(key))
+
+    # Register A (17 bytes)
+    A = list(key[0:32:2])
+    A.append(0)
+    # Register B (16 bytes)
+    B = list(key[1:32:2])
+    # Remaining key bytes (384..1024 bit keys)
+    extra = list(key[32:])
+    extra_index = 0
+
+    def _next_extra():
+        nonlocal extra_index
+        if not extra:
+            return 0
+        x = extra[extra_index]
+        extra_index += 1
+        if extra_index == len(extra):
+            extra_index = 0
+        return x
+
+    def _feedback_A():
+        f = (
+            SBOX[A[0]]
+            + SBOX[A[3]]
+            + A[7]
+            + SBOX[A[12]]
+            + A[16]
+            + _next_extra()
+        )
+        return f & 0xFF
+
+    def _feedback_B():
+        f = (
+            SBOX[B[0]]
+            + B[7]
+            + SBOX[B[11]]
+            + B[14]
+            + SBOX[B[15]]
+            + _next_extra()
+        )
+        return f & 0xFF
+
+    def _clock():
+        nonlocal A, B
+        fa = _feedback_A()
+        fb = _feedback_B()
+        # Shift
+        A = A[1:] + [fa]
+        B = B[1:] + [fb]
+
+    keys = []
+    for _ in range(rounds):
+        for _ in range(17):
+            _clock()
+        keys.append(bytes(((A[i] + B[i]) & 0xFF) for i in range(16)))
+    return keys
 
 
 class QALQAN_CVL:
@@ -625,7 +731,10 @@ class QALQAN_CVL:
 
         # ---- determine the round keys -----------------------------------
         if rks is None and key is not None:
-            rks = [int.from_bytes(rk, "big") for rk in _reference_round_keys(key)]
+            rks = [
+                int.from_bytes(rk, "big")
+                for rk in _qalqan_round_keys(key, R)
+            ]
         if rks is None:
             raise ValueError(
                 "Either 'rks' (list of round-key integers) or 'key' "
