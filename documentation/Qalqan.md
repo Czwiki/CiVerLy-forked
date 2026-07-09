@@ -96,14 +96,11 @@ Figure 2: Key expansion node.
 3.4. Encryption Algorithm
 3.4.1. Encryption
 The encryption function consists of three parts and has the form:
-𝐸1(𝑇𝑒𝑥𝑡) = 𝐿 (𝑆 (𝐾⨁
-𝑠𝑡𝑎𝑟𝑡(𝑇𝑒𝑥𝑡)))
+𝐸1(𝑇𝑒𝑥𝑡) = 𝐿 (𝑆 (𝐾⨁𝑠𝑡𝑎𝑟𝑡(𝑇𝑒𝑥𝑡)))
 𝐸2(𝑇𝑒𝑥𝑡) = 𝑋𝑁−1𝑆𝐿(… 𝑋2𝑆𝐿(𝑋1𝑆𝐿(𝐸1(𝑇𝑒𝑥𝑡))))
-𝐸(𝑇𝑒𝑥𝑡) = 𝐾⨁
-𝑓𝑖𝑛(𝐸2(𝑇𝑒𝑥𝑡))
+𝐸(𝑇𝑒𝑥𝑡) = 𝐾⨁𝑓𝑖𝑛(𝐸2(𝑇𝑒𝑥𝑡))
 The encryption algorithm schematically represented as follows:
 Figure 3: General view of the transformation
-209
 0 1 2 3 4 5 6 7 8 9 a b c d e f
 0 87 83 59 5c f4 f8 9a 90 b1 16 26 0d 57 92 2a 9c
 1 f2 29 11 5e 44 88 22 a9 ae 54 2f 4c 79 a5 b2 43
@@ -128,37 +125,27 @@ following order 𝐼𝑛𝑣𝑆(0), . . , 𝐼𝑛𝑣𝑆(255)):
 Figure 4: Qalqan inverted S-box
 Inverse linear operation 𝐼𝑛𝑣𝐿: 𝑉 128 → 𝑉 128 converts 16 byte input block B to output block R of the
 same size as follows (bytes are numbered in ascending order):
-𝑅1 = 𝐵1
-∸ 𝐵5
+𝑅1 = 𝐵1∸ 𝐵5
 𝑅2 = 𝐵2 ∸ 𝐵10
 𝑅3 = 𝐵3 ∸ 𝐵15
-𝑅4 = 𝐵4
-∸ 𝐵0
+𝑅4 = 𝐵4∸ 𝐵0
 𝑅6 = 𝐵6 ∸ 𝐵10
-𝑅7 = 𝐵7
-∸ 𝐵15
+𝑅7 = 𝐵7∸ 𝐵15
 𝑅8 = 𝐵8 ∸ 𝐵0
 𝑅9 = 𝐵9 ∸ 𝐵5
-𝑅11 = 𝐵11
-∸ 𝐵15
+𝑅11 = 𝐵11∸ 𝐵15
 𝑅12 = 𝐵12 ∸ 𝐵0
-𝑅14 = 𝐵14
-∸ 𝐵0
-𝑅0 = 𝐵0 ∸ 𝑅1
-∸ 𝑅2 ∸ 𝑅3
-𝑅5 = 𝐵5 ∸ 𝑅4
-∸ 𝑅6 ∸ 𝑅7
+𝑅14 = 𝐵14∸ 𝐵0
+𝑅0 = 𝐵0 ∸ 𝑅1∸ 𝑅2 ∸ 𝑅3
+𝑅5 = 𝐵5 ∸ 𝑅4∸ 𝑅6 ∸ 𝑅7
 𝑅10 = 𝐵10 ∸ 𝑅8 ∸ 𝑅9 ∸ 𝑅11
 𝑅15 = 𝐵15 ∸ 𝑅12 ∸ 𝑅13 ∸ 𝑅14
 The round keys 𝐾⊟ are superimposed by modulo 2128subtraction. The keys of the first and last
 rounds are superimposed by modulo 2 operation.
 One round of the 𝑆𝐿𝑋 decryption algorithm includes sequentially linear, non-linear transformations
-and key addition, thus 𝑆𝐿𝑋𝑖(𝐶𝑖𝑝ℎ𝑒𝑟) = 𝐾⊟
-𝑖 (𝐼𝑛𝑣𝐿(𝐼𝑛𝑣𝑆(𝐶𝑖𝑝ℎ𝑒𝑟)).
+and key addition, thus 𝑆𝐿𝑋𝑖(𝐶𝑖𝑝ℎ𝑒𝑟) = 𝐾⊟ 𝑖 (𝐼𝑛𝑣𝐿(𝐼𝑛𝑣𝑆(𝐶𝑖𝑝ℎ𝑒𝑟)).
 The decrypting operation of the Cipher ciphertext on round keys Key is represented as follows:
-𝐷1(𝐶𝑖𝑝ℎ𝑒𝑟) = 𝐾⨁
-𝑓𝑖𝑛(𝐶𝑖𝑝ℎ𝑒𝑟)
-210
+𝐷1(𝐶𝑖𝑝ℎ𝑒𝑟) = 𝐾⨁𝑓𝑖𝑛(𝐶𝑖𝑝ℎ𝑒𝑟)
+
 𝐷2(𝐶𝑖𝑝ℎ𝑒𝑟) = 𝑆𝐿𝑋1(… 𝑆𝐿𝑋𝑁−2(𝑆𝐿𝑋𝑁−1(𝐷1(𝐶𝑖𝑝ℎ𝑒𝑟))))
-𝐷(𝐶𝑖𝑝ℎ𝑒𝑟) = 𝐾⨁
-𝑠𝑡𝑎𝑟𝑡 (𝐼𝑛𝑣𝐿 (𝐼𝑛𝑣𝑆(𝐷2(𝐶𝑖𝑝ℎ𝑒𝑟))))
+𝐷(𝐶𝑖𝑝ℎ𝑒𝑟) = 𝐾⨁𝑠𝑡𝑎𝑟𝑡 (𝐼𝑛𝑣𝐿 (𝐼𝑛𝑣𝑆(𝐷2(𝐶𝑖𝑝ℎ𝑒𝑟))))
