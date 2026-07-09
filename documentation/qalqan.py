@@ -12,6 +12,7 @@ readability over performance.
 
 from __future__ import annotations
 
+from math import log2
 import os
 from typing import List
 
@@ -519,3 +520,57 @@ def pkcs7_pad(data: bytes) -> bytes:
     pad = 16 - (len(data) % 16)
 
     return data + bytes([pad]) * pad
+
+
+###########################################################################
+# 2-round differential analysis
+###########################################################################
+
+if __name__ == "__main__":
+
+    INPUT_DIFF  = bytes([0x00] * 15 + [0xf0])
+    OUTPUT_DIFF = bytes([0x00] * 15 + [0x80])
+
+    NUM_KEYS    = 1
+    NUM_SAMPLES = 100000000        # adjust for accuracy / runtime
+
+    total_hits  = 0
+    total_tests = 0
+
+    for _ in range(NUM_KEYS):
+        key = (0).to_bytes(32, "big")       # 256-bit key
+        scheduler = KeyScheduler(key)
+        round_keys = scheduler.expand()
+
+        # For 2 rounds we need whitening (rk0) plus two middle rounds (rk1, rk2).
+        # round_keys[:4] makes round_keys[1:-1] contain exactly [rk1, rk2].
+        rk0, rk1 = round_keys[0], round_keys[1]
+
+        for i in range(NUM_SAMPLES):
+            p1 = i.to_bytes(16, "little")
+            p2 = xor_bytes(p1, INPUT_DIFF)
+
+            # --- whitening ---
+            s1 = xor_bytes(p1, rk0)
+            s2 = xor_bytes(p2, rk0)
+
+            # --- round 1 ---
+            s1 = S(s1);  s1 = L(s1);  s1 = add128(s1, rk1)
+            s2 = S(s2);  s2 = L(s2);  s2 = add128(s2, rk1)
+
+            # --- round 2 ---
+            #s1 = S(s1);  s1 = L(s1);  s1 = add128(s1, rk2)
+            #s2 = S(s2);  s2 = L(s2);  s2 = add128(s2, rk2)
+
+            if xor_bytes(s1, s2) == OUTPUT_DIFF:
+                total_hits += 1
+            total_tests += 1
+
+    result = total_hits / total_tests
+    print("Pairs tested :", total_tests)
+    print("Hits         :", total_hits)
+    print("Probability  :", result)
+    if result > 0:
+        print("Weight (log2):", log2(result))
+    else:
+        print("Weight       : -inf")
