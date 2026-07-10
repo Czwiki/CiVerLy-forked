@@ -52,6 +52,27 @@ class BEANIE_CVL:
 
         TESTS:
 
+        Verify with official test vectors (Table 15)::
+
+            sage: from civerly.cipher_implementations.beanie import BEANIE_CVL
+            sage: from civerly.util import int_to_vec, vec_to_int
+            sage: rks1 = [
+            ....:   0xbeedff0f, 0xf8a29afc, 0x9369ab08,
+            ....:   0x7391f5d3, 0x464f65f3, 0xe0f85edb
+            ....: ]
+            sage: beanie = BEANIE_CVL(R=5, rks=rks1)
+            sage: hex(vec_to_int(beanie(int_to_vec(0x00000000, 32))))
+            '0xda46f4d3'
+            sage: rks2 = [
+            ....:   0x93061e07, 0x87607a4d, 0xd7d11b34,
+            ....:   0xb1769b2e, 0x1466644a, 0x66a7801a
+            ....: ]
+            sage: beanie = BEANIE_CVL(R=5, rks=rks2)
+            sage: hex(vec_to_int(beanie(int_to_vec(0x1841938a, 32))))
+            '0x92c2fea'
+
+        Single-round trace::
+
             sage: from civerly.cipher_implementations.beanie import BEANIE_CVL
             sage: from civerly.util import int_to_vec, vec_to_int
             sage: beanie = BEANIE_CVL(R=1)
