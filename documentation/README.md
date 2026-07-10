@@ -66,7 +66,25 @@ Pitfall: overlapping or missing edges often produce silently wrong behavior or `
 
 Pitfall: if you do not call `add_output` for all outputs, `is_valid` remains false and evaluation/modeling fails.
 
-## 4) Model-friendly component choices
+## 4) Sliceable round construction
+
+Design the cipher so that individual rounds or round ranges can be extracted for isolated analysis. This is essential for analyzing truncated differentials, bounding probabilities over specific round intervals, or comparing trails across partial cipher variants.
+
+Guidelines:
+
+- Build each round as a named subcipher so that round boundaries are explicit in the DAG. Avoid flattening multiple rounds into a single anonymous subcipher.
+- If the round function is uniform, construct it once and add it repeatedly with `add_subcipher`, but ensure each instantiation is wired independently so tools can slice between any two round nodes.
+- Provide an `R` parameter (total number of rounds) and document whether the constructor accepts a start/end round range or if slicing is done externally via the cipher graph.
+- When adding outputs, ensure intermediate round states can be exposed if the analysis tool supports it. At minimum, the final round must terminate with `add_output`.
+- If round constants or keys vary per round, store them in a list indexed by round number so that a slice from round `r_start` to `r_end` can retrieve the correct constants without recomputing the full schedule.
+
+Round slicing in practice:
+
+- Some modeling pipelines expect a contiguous subgraph from round `a` to round `b`. Keeping the DAG layered by round makes this extraction straightforward.
+- If the cipher has an initial or final whitening layer, model these as separate subciphers (or as round 0 and round `R+1`) so they do not interfere with round-indexed slicing.
+- Test slicing by extracting a sub-cipher for rounds 2–9 (or 1–10) and verifying that `is_valid` remains true and that test vectors for the full cipher can be reproduced by composing the slices.
+
+## 5) Model-friendly component choices
 
 Use CiVerLy components whenever possible to keep compatibility with modeling:
 
@@ -86,7 +104,7 @@ Pitfalls:
 - `PermuteLayer_CVL` can act on words or bits. Always set `word_coarseness` to match the cipher word size if you expect word-level permutations.
 - Reusing the same mutable component object across unrelated layers can lead to confusing names or shared state; prefer building dedicated layer ciphers for repeated structures.
 
-## 5) AES-like indexing and layout
+## 6) AES-like indexing and layout
 
 `AESlike` uses column-wise indexing of the state (AES convention). If the reference cipher uses row-wise indexing (common in some designs), you must transpose before and after ShiftRows-like steps. If you skip this, trails and test vectors will not match.
 
@@ -97,13 +115,13 @@ Suggested practice:
 - Document the chosen indexing scheme in the class docstring.
 - Keep a small helper permutation for transpose operations, so it is visible and easy to review.
 
-## 6) Key schedule strategy
+## 7) Key schedule strategy
 
 Decide whether the key schedule is modeled explicitly. If you only need fixed-round testing or do not analyze related-key behavior, use constants in `RoundkeyXOR_CVL` and pass `rks` to the constructor. If the key schedule matters to your analysis, model it as a dedicated subcipher instead of hard-coding the constants in the round function.
 
 Practical rule: if the examples in `skinny.py` or `abc.py` set round constants on a node before each round, follow that pattern; if the round key is fixed and externally known, a constant XOR is usually enough.
 
-## 7) Provide tests and examples
+## 8) Provide tests and examples
 
 Follow the existing pattern in `aes.py`, `present.py`, and `abc.py`:
 
@@ -123,7 +141,7 @@ Recommended minimum test set:
 - One test that runs `analyse` or `model` with a supported solver (optional tag).
 - One test that calls `get_trail` and asserts that no unnamed components appear.
 
-## 8) Minimal template
+## 9) Minimal template
 
 Below is a minimal structure showing the expected style:
 
@@ -168,7 +186,7 @@ Adjust word sizes, state layout, and components as required by the design.
 
 When you add multiple parallel instances of a component, prefer building a dedicated layer cipher (S-box layer, linear layer, etc.). This keeps naming consistent and makes trails readable.
 
-## 9) Modeling options and performance notes
+## 10) Modeling options and performance notes
 
 - Wordwise MILP is much faster than bitwise MILP, but only available for `WordSBoxCipher` and `AESlike`.
 - `LINEAR_LAYER_MODELING.GENERALIZED_WORDWISE` may require external solving of an auxiliary MILP. Provide a solver or prepare for a two-stage run as shown in `aes.py`.
@@ -177,7 +195,7 @@ When you add multiple parallel instances of a component, prefer building a dedic
 
 The generated reports also follow the same distinction: AESlike models are rendered on a rectangular state, while general `WordSBoxCipher` reports show a flat word state. That difference is useful to keep in mind when you choose the base class and the state layout.
 
-## 10) Common pitfalls checklist
+## 11) Common pitfalls checklist
 
 - Wrong cipher class (MILP suddenly unavailable).
 - Missing or incomplete `add_output` calls.
@@ -195,14 +213,14 @@ The generated reports also follow the same distinction: AESlike models are rende
 - Forgetting that AES-like linear layers must be column-aligned and sized to one state column.
 - Treating `get_trail()` output as trustworthy when `Unnamed Component` still appears; that usually means a naming or wiring problem remains.
 
-## 11) Where to look for examples
+## 12) Where to look for examples
 
 - `aes.py`: `AESlike` construction, MixColumn modeling, and column-wise indexing.
 - `present.py`: `WordSBoxCipher`, permutation layers, and wordwise modeling tradeoffs.
 - `skinny.py`: key schedule subciphers, LFSR modeling, and round-constant wiring.
 - `abc.py`: layered `SBoxCipher` construction, round constants, and repeated subcipher naming.
 
-## 12) Related docs pages
+## 13) Related docs pages
 
 The docs tree already contains focused reference pages for the same topics this guide covers:
 
