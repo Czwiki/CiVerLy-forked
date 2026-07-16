@@ -8,7 +8,8 @@ from sage.matrix.special import identity_matrix, block_matrix
 
 
 class BEANIE_CVL:
-    def __init__(self, R=5, rks=None, name=None):
+    def __init__(self, R=5, rks=None, name=None, rl=None, rr=None,
+                 rks_right=None):
         r"""
         The CiVerLy implementation of BEANIE.
 
@@ -20,9 +21,22 @@ class BEANIE_CVL:
             - ``R`` -- integer (default: ``5``); Number of encryption rounds.
 
             - ``rks`` -- list (optional); The round key values. Must have
-              length :math:`R+1`. Defaults to all zeros.
+              length :math:`R+1` (normal mode) or :math:`rl+1` (U-shape mode).
+              Defaults to all zeros.
 
             - ``name`` -- string (optional); The name of the cipher.
+
+            - ``rl`` -- integer (optional); Number of rounds for the left
+              (encryption) branch in the U-shape attack. If provided together
+              with ``rr``, the cipher is assembled as a U-shape
+              :math:`E^{-1}_{K,T'} \circ E_{K,T}`.
+
+            - ``rr`` -- integer (optional); Number of rounds for the right
+              (decryption) branch in the U-shape attack.
+
+            - ``rks_right`` -- list (optional); The round key values for the
+              right branch in U-shape mode. Must have length :math:`rr+1`.
+              Defaults to all zeros.
 
         This cipher is "plug-and-play" usable.
 
@@ -49,6 +63,39 @@ class BEANIE_CVL:
             '0xf05a49f1'
             sage: hex(vec_to_int(beanie(int_to_vec(0xabcdef01, 32))))
             '0x8dd221be'
+
+        U-shape attack with one round on each branch::
+
+            sage: from civerly.cipher_implementations.beanie import BEANIE_CVL
+            sage: from civerly.util import int_to_vec, vec_to_int
+            sage: rks_left = [0x01234567, 0x89abcdef]
+            sage: rks_right = [0xfedcba98, 0x76543210]
+            sage: beanie_u = BEANIE_CVL(rl=1, rr=1, rks=rks_left,
+            ....:                       rks_right=rks_right)
+            sage: hex(vec_to_int(beanie_u(int_to_vec(0x12345678, 32))))
+            '0xcfe08ba5'
+
+        U-shape attack with two left and one right round::
+
+            sage: from civerly.cipher_implementations.beanie import BEANIE_CVL
+            sage: from civerly.util import int_to_vec, vec_to_int
+            sage: rks_left = [0x01234567, 0x89abcdef, 0xfedcba98]
+            sage: rks_right = [0x76543210, 0x11111111]
+            sage: beanie_u = BEANIE_CVL(rl=2, rr=1, rks=rks_left,
+            ....:                       rks_right=rks_right)
+            sage: hex(vec_to_int(beanie_u(int_to_vec(0x12345678, 32))))
+            '0x458728b0'
+
+        U-shape attack with two rounds on each branch::
+
+            sage: from civerly.cipher_implementations.beanie import BEANIE_CVL
+            sage: from civerly.util import int_to_vec, vec_to_int
+            sage: rks_left = [0x01234567, 0x89abcdef, 0xfedcba98]
+            sage: rks_right = [0x76543210, 0x11111111, 0x22222222]
+            sage: beanie_u = BEANIE_CVL(rl=2, rr=2, rks=rks_left,
+            ....:                       rks_right=rks_right)
+            sage: hex(vec_to_int(beanie_u(int_to_vec(0x12345678, 32))))
+            '0x3f8b64ed'
 
         TESTS:
 
@@ -145,12 +192,34 @@ class BEANIE_CVL:
         """
         if name is None:
             name = "BEANIE"
-        if rks is None:
-            rks = [0] * (R + 1)
-        if len(rks) != R + 1:
-            raise ValueError(
-                f"rks must have length R+1 = {R+1}, got {len(rks)}"
-            )
+
+        u_shape_mode = (rl is not None) or (rr is not None)
+
+        if not u_shape_mode:
+            if rks is None:
+                rks = [0] * (R + 1)
+            if len(rks) != R + 1:
+                raise ValueError(
+                    f"rks must have length R+1 = {R+1}, got {len(rks)}"
+                )
+        else:
+            if rl is None:
+                rl = 0
+            if rr is None:
+                rr = 0
+            if rks is None:
+                rks = [0] * (rl + 1)
+            if len(rks) != rl + 1:
+                raise ValueError(
+                    f"rks must have length rl+1 = {rl+1}, got {len(rks)}"
+                )
+            if rks_right is None:
+                rks_right = [0] * (rr + 1)
+            if len(rks_right) != rr + 1:
+                raise ValueError(
+                    "rks_right must have length rr+1 = "
+                    f"{rr+1}, got {len(rks_right)}"
+                )
 
         # BEANIE S-box
         sbox = SBox_CVL(
@@ -241,26 +310,129 @@ class BEANIE_CVL:
         )
         beanie_last.add_output([(node_p, (i, i)) for i in range(8)])
 
-        # Assemble the cipher
-        beanie_cipher = AESlike(4, 4, 2, name=name)
+        if not u_shape_mode:
+            # Assemble the normal cipher
+            beanie_cipher = AESlike(4, 4, 2, name=name)
+            node = beanie_cipher.IN
+            for r in range(R - 1):
+                beanie_round.nodes[node_rk].const = rks[r]
+                node = beanie_cipher.add_subcipher(
+                    beanie_round, [(node, (i, i)) for i in range(8)]
+                )
+
+            beanie_last.nodes[node_rk_last].const = rks[R - 1]
+            node = beanie_cipher.add_subcipher(
+                beanie_last, [(node, (i, i)) for i in range(8)]
+            )
+
+            key_add_final = RoundkeyXOR_CVL(32, const=rks[R], name="KeyAdd")
+            node = beanie_cipher.add_subcipher(
+                key_add_final, [(node, (i, i)) for i in range(8)]
+            )
+            beanie_cipher.add_output([(node, (i, i)) for i in range(8)])
+
+            self.beanie_cipher = beanie_cipher
+            return
+
+        # Build U-shape cipher: E^{-1}_{K,T'} \circ E_{K,T}
+        # Inverse S-box layer
+        sbox_inv = SBox_CVL(sbox.S.inverse(), name="SBox_inv")
+        sboxlayer_inv = AESlike(4, 4, 2, name="SBoxLayer_inv")
+        for i in range(8):
+            node = sboxlayer_inv.add_subcipher(
+                sbox_inv, [(sboxlayer_inv.IN, (i, 0))]
+            )
+            sboxlayer_inv.add_output([(node, (0, i))])
+
+        # Inverse last block: KeyAdd -> ShiftRows -> SBox_inv -> KeyAdd
+        # (corresponds to the inverse of the last encryption round)
+        key_add_inv_first = RoundkeyXOR_CVL(32, const=0x0, name="KeyAdd")
+        beanie_inv_last = AESlike(4, 4, 2, name="BEANIE-inv-last")
+        node_rk_inv_first = beanie_inv_last.add_subcipher(
+            key_add_inv_first,
+            [(beanie_inv_last.IN, (i, i)) for i in range(8)]
+        )
+        node_p_inv = beanie_inv_last.add_subcipher(
+            shiftrows,
+            [(node_rk_inv_first, (i, i)) for i in range(8)]
+        )
+        node_s_inv = beanie_inv_last.add_subcipher(
+            sboxlayer_inv,
+            [(node_p_inv, (i, i)) for i in range(8)]
+        )
+        key_add_inv_second = RoundkeyXOR_CVL(32, const=0x0, name="KeyAdd")
+        node_rk_inv_second = beanie_inv_last.add_subcipher(
+            key_add_inv_second,
+            [(node_s_inv, (i, i)) for i in range(8)]
+        )
+        beanie_inv_last.add_output(
+            [(node_rk_inv_second, (i, i)) for i in range(8)]
+        )
+
+        # Inverse round block: MixColumns -> ShiftRows -> SBox_inv -> KeyAdd
+        beanie_inv_round = AESlike(4, 4, 2, name="BEANIE-inv-round")
+        node_mix0 = beanie_inv_round.add_subcipher(
+            mixcolumn,
+            [(beanie_inv_round.IN, (i, i)) for i in range(4)]
+        )
+        node_mix1 = beanie_inv_round.add_subcipher(
+            mixcolumn,
+            [(beanie_inv_round.IN, (i + 4, i)) for i in range(4)]
+        )
+        node_p_inv = beanie_inv_round.add_subcipher(
+            shiftrows,
+            [(node_mix0, (i, i)) for i in range(4)] +
+            [(node_mix1, (i, i + 4)) for i in range(4)]
+        )
+        node_s_inv = beanie_inv_round.add_subcipher(
+            sboxlayer_inv,
+            [(node_p_inv, (i, i)) for i in range(8)]
+        )
+        key_add_inv_round = RoundkeyXOR_CVL(32, const=0x0, name="KeyAdd")
+        node_rk_inv_round = beanie_inv_round.add_subcipher(
+            key_add_inv_round,
+            [(node_s_inv, (i, i)) for i in range(8)]
+        )
+        beanie_inv_round.add_output(
+            [(node_rk_inv_round, (i, i)) for i in range(8)]
+        )
+
+        # Assemble the U-shape cipher
+        beanie_cipher = AESlike(4, 4, 2, name=f"{name}-U-{rl}-{rr}")
         node = beanie_cipher.IN
-        for r in range(R - 1):
+
+        # Left branch: rl rounds of encryption
+        for r in range(rl - 1):
             beanie_round.nodes[node_rk].const = rks[r]
             node = beanie_cipher.add_subcipher(
                 beanie_round, [(node, (i, i)) for i in range(8)]
             )
+        if rl > 0:
+            beanie_last.nodes[node_rk_last].const = rks[rl - 1]
+            node = beanie_cipher.add_subcipher(
+                beanie_last, [(node, (i, i)) for i in range(8)]
+            )
+            key_add_final_left = RoundkeyXOR_CVL(
+                32, const=rks[rl], name="KeyAdd"
+            )
+            node = beanie_cipher.add_subcipher(
+                key_add_final_left, [(node, (i, i)) for i in range(8)]
+            )
 
-        beanie_last.nodes[node_rk_last].const = rks[R - 1]
-        node = beanie_cipher.add_subcipher(
-            beanie_last, [(node, (i, i)) for i in range(8)]
-        )
+        # Right branch: rr rounds of decryption
+        if rr > 0:
+            beanie_inv_last.nodes[node_rk_inv_first].const = rks_right[rr]
+            beanie_inv_last.nodes[node_rk_inv_second].const = rks_right[rr - 1]
+            node = beanie_cipher.add_subcipher(
+                beanie_inv_last, [(node, (i, i)) for i in range(8)]
+            )
+            for r in range(rr - 2, -1, -1):
+                beanie_inv_round.nodes[node_rk_inv_round].const = rks_right[r]
+                node = beanie_cipher.add_subcipher(
+                    beanie_inv_round, [(node, (i, i)) for i in range(8)]
+                )
 
-        key_add_final = RoundkeyXOR_CVL(32, const=rks[R], name="KeyAdd")
-        node = beanie_cipher.add_subcipher(
-            key_add_final, [(node, (i, i)) for i in range(8)]
-        )
         beanie_cipher.add_output([(node, (i, i)) for i in range(8)])
-
         self.beanie_cipher = beanie_cipher
 
     def __new__(cls, *args, **kwargs):
