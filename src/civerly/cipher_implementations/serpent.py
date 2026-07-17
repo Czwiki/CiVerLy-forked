@@ -403,7 +403,7 @@ class SERPENT_CVL:
 
     INPUT::
 
-        - ``R`` -- integer; Number of rounds (default: 32).
+        - ``R`` -- integer; Number of rounds (default: ``32``).
 
         - ``rks`` -- list (optional); Specifies the round key values.
           Must have length ``R+1`` (33 keys for full-round Serpent).
@@ -416,6 +416,13 @@ class SERPENT_CVL:
         - ``keylen`` -- integer (default: ``128``); Length of ``key`` in bits.
 
         - ``name`` -- string (optional); The name of the cipher.
+
+        - ``first_round`` -- integer (default: ``0``); The first Serpent round
+          to include. Use this to construct a reduced-round cipher starting at
+          a later round (e.g. ``first_round=4`` for the attack on rounds 4--10).
+
+        - ``last_round`` -- integer (optional); The last Serpent round to
+          include. If given, ``R`` is computed as ``last_round - first_round + 1``.
 
     EXAMPLES::
 
@@ -442,6 +449,34 @@ class SERPENT_CVL:
             sage: vec_to_int(result) > 0
             True
 
+        Construct an exact slice of the cipher (rounds 4--10).  In this
+        mode the internal data path is preserved: IP and FP are omitted
+        because they lie outside the chosen range, and every selected round
+        keeps its linear transformation (only the true final round, 31,
+        would receive an extra key XOR instead).::
+
+            sage: serpent = SERPENT_CVL(key=0, keylen=128, first_round=4, last_round=10)
+            sage: result = serpent(int_to_vec(0x0, 128))
+            sage: vec_to_int(result) > 0
+            True
+            sage: names = [n.name for n in serpent.nodes]
+            sage: 'IP' in names
+            False
+            sage: 'FP' in names
+            False
+            sage: names.count('LT')
+            7
+
+        Backward-compatible reduced-round cipher (R=7) still ends with the
+        final key XOR and FP::
+
+            sage: serpent = SERPENT_CVL(key=0, keylen=128, R=7)
+            sage: names = [n.name for n in serpent.nodes]
+            sage: 'FP' in names
+            True
+            sage: names.count('LT')
+            6
+
         Model the cipher with MILP::
 
             sage: from civerly.cipher_implementations.serpent import SERPENT_CVL
@@ -463,25 +498,44 @@ class SERPENT_CVL:
 
     """
 
-    def __init__(self, R=32, rks=None, key=None, keylen=128, name=None):
+    def __init__(self, R=32, rks=None, key=None, keylen=128, name=None, first_round=0, last_round=None):
         if name is None:
             name = "SERPENT"
 
+        if last_round is not None:
+            R = last_round - first_round + 1
+
+        if R > 32:
+            raise ValueError("Serpent only supports up to 32 rounds")
+        if first_round < 0 or first_round + R - 1 >= 32:
+            raise ValueError("Invalid round range for Serpent")
+
+        # exact_slice: build the exact internal data path for the chosen
+        # round range.  In this mode IP/FP are omitted unless the slice
+        # reaches the real cipher boundaries, and every round keeps its
+        # original LT except the true final round (31).
+        exact_slice = (first_round != 0 or last_round is not None)
+        effective_last_round = last_round if last_round is not None else first_round + R - 1
+
         if rks is None:
             if key is not None:
-                rks = serpent_key_schedule(key, keylen=keylen, R=R)
+                full_rks = serpent_key_schedule(key, keylen=keylen, R=32)
+                rks = full_rks[first_round:first_round + R + 1]
             else:
                 rks = [0 for _ in range(R + 1)]
+        elif len(rks) < R + 1:
+            raise ValueError(f"Need at least {R+1} round keys, got {len(rks)}")
 
         lt = _build_serpent_linear_layer()
 
-        def make_sboxlayer(sbox_idx):
-            sboxlayer = SBoxCipher(128, 128, name=f"SBoxLayer_{sbox_idx}")
+        def make_sboxlayer(round_num):
+            sbox_idx = round_num % 8
+            sboxlayer = SBoxCipher(128, 128, name=f"SBoxLayer_R{round_num}")
             output_edges = []
             for n in range(32):
                 in_pos = [127 - (4 * n + k) for k in range(4)]
                 sbox = SBox_CVL(
-                    SERPENT_SBOXES[sbox_idx], name=f"S{sbox_idx}_{n}"
+                    SERPENT_SBOXES[sbox_idx], name=f"S{sbox_idx}_R{round_num}_{n}"
                 )
                 node = sboxlayer.add_subcipher(
                     sbox,
@@ -496,30 +550,46 @@ class SERPENT_CVL:
         cipher = SBoxCipher(128, 128, name=name)
 
         # Initial permutation: standard -> standard-permuted (bitslice)
-        ip = PermuteLayer_CVL(FP_TABLE, name="IP")
-        current = cipher.add_subcipher(
-            ip, [(cipher.IN, (i, i)) for i in range(128)]
-        )
+        if not exact_slice or first_round == 0:
+            ip = PermuteLayer_CVL(FP_TABLE, name="IP")
+            current = cipher.add_subcipher(
+                ip, [(cipher.IN, (i, i)) for i in range(128)]
+            )
+        else:
+            current = cipher.IN
 
         for r in range(R):
+            round_num = first_round + r
             # Key addition
-            key_add = RoundkeyXOR_CVL(128, rks[r], name=f"K{r}")
+            key_add = RoundkeyXOR_CVL(128, rks[r], name=f"K{round_num}")
             current = cipher.add_subcipher(
                 key_add, [(current, (i, i)) for i in range(128)]
             )
 
             # S-box layer
-            sboxlayer = make_sboxlayer(r % 8)
+            sboxlayer = make_sboxlayer(round_num)
             current = cipher.add_subcipher(
                 sboxlayer, [(current, (i, i)) for i in range(128)]
             )
 
             if r == R - 1:
-                # Last round: final key XOR instead of LT
-                key_final = RoundkeyXOR_CVL(128, rks[R], name=f"K{R}")
-                current = cipher.add_subcipher(
-                    key_final, [(current, (i, i)) for i in range(128)]
-                )
+                if exact_slice and round_num == 31:
+                    # True final round of Serpent: extra key XOR
+                    key_final = RoundkeyXOR_CVL(128, rks[R], name=f"K{round_num + 1}")
+                    current = cipher.add_subcipher(
+                        key_final, [(current, (i, i)) for i in range(128)]
+                    )
+                elif exact_slice:
+                    # Internal round in an exact slice: keep LT
+                    current = cipher.add_subcipher(
+                        lt, [(current, (i, i)) for i in range(128)]
+                    )
+                else:
+                    # Reduced-round mode: last round uses key XOR instead of LT
+                    key_final = RoundkeyXOR_CVL(128, rks[R], name=f"K{round_num + 1}")
+                    current = cipher.add_subcipher(
+                        key_final, [(current, (i, i)) for i in range(128)]
+                    )
             else:
                 # Linear transformation
                 current = cipher.add_subcipher(
@@ -527,10 +597,11 @@ class SERPENT_CVL:
                 )
 
         # Final permutation: standard-permuted -> standard
-        fp = PermuteLayer_CVL(IP_TABLE, name="FP")
-        current = cipher.add_subcipher(
-            fp, [(current, (i, i)) for i in range(128)]
-        )
+        if not exact_slice or effective_last_round == 31:
+            fp = PermuteLayer_CVL(IP_TABLE, name="FP")
+            current = cipher.add_subcipher(
+                fp, [(current, (i, i)) for i in range(128)]
+            )
 
         cipher.add_output([(current, (i, i)) for i in range(128)])
 
