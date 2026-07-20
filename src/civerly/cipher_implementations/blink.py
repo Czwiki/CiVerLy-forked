@@ -659,6 +659,4 @@ def ra_rb_from_n_t(n, t):
     """Infer ``ra + rb`` from block/tweak sizes for the default key length."""
     if n == 64:
         return 5
-    if t == 128:
-        return 6
-    return 8
+    return 6
