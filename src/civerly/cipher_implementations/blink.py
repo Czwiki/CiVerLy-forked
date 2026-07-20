@@ -363,6 +363,14 @@ class BLINK_CVL:
 
         - ``name`` -- string (optional); Name of the cipher instance.
 
+        - ``rl`` -- integer (optional); Number of outer forward / inverse
+          rounds (replaces the variant's default ``ra``). Defaults to the
+          standard value for the chosen block/tweak size.
+
+        - ``rr`` -- integer (optional); Number of inner forward / inverse
+          rounds (replaces the variant's default ``rb``). Defaults to the
+          standard value for the chosen block/tweak size.
+
     The test vectors below are taken from ``documentation/blink test
     vectors.md`` (and agree with ``documentation/blink.py``)::
 
@@ -398,6 +406,13 @@ class BLINK_CVL:
         sage: blink = BLINK_CVL(128, 256, key=key, tweak=0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)
         sage: hex(vec_to_int(blink(int_to_vec(0, 128))))
         '0x8dc41b223bc8cd9923b1297dd27583fc'
+
+    Reduced-round instances can be built by passing ``rl`` and ``rr``::
+
+        sage: from civerly.cipher_implementations.blink import BLINK_CVL
+        sage: blink = BLINK_CVL(64, 64, rl=1, rr=1)
+        sage: blink.is_valid
+        True
 
     The graph contains only explicitly named components::
 
@@ -435,7 +450,7 @@ class BLINK_CVL:
 
     """
 
-    def __init__(self, n=64, t=64, key=0, tweak=0, name=None):
+    def __init__(self, n=64, t=64, key=0, tweak=0, name=None, rl=None, rr=None):
         if name is None:
             name = f"Blink-{n}"
 
@@ -444,6 +459,17 @@ class BLINK_CVL:
 
         state_bytes, tweak_bytes, ra, rb, pbox, rc, rc_prime = _variant_config(
             n, t, (key.bit_length() + 7) // 8 if key else (n // 8) * (ra_rb_from_n_t(n, t) + 2)
+        )
+
+        if rl is None:
+            rl = ra
+        if rr is None:
+            rr = rb
+
+        assert rl >= 0 and rr >= 0, "rl and rr must be non-negative"
+        assert rl + rr <= ra + rb, (
+            f"rl({rl}) + rr({rr}) exceeds available round keys/constants "
+            f"for this variant (max {ra + rb})"
         )
 
         # Eagerly evaluate the key schedule. The reference treats the master
@@ -564,8 +590,8 @@ class BLINK_CVL:
         node = cipher.add_subcipher(
             rk_xor(w0_int), [(node, (i, i)) for i in range(state_nibbles)]
         )
-        # a forward keyed rounds
-        for r in range(ra):
+        # rl forward keyed rounds
+        for r in range(rl):
             node = cipher.add_subcipher(
                 fwd_round, [(node, (i, i)) for i in range(state_nibbles)]
             )
@@ -576,20 +602,20 @@ class BLINK_CVL:
         node = cipher.add_subcipher(
             perm, [(node, (i, i)) for i in range(state_nibbles)]
         )
-        # b forward keyed rounds
-        for r in range(rb):
+        # rr forward keyed rounds
+        for r in range(rr):
             node = cipher.add_subcipher(
                 fwd_round, [(node, (i, i)) for i in range(state_nibbles)]
             )
-            cipher.nodes[node].nodes[fwd_rk].const = rk_int[ra + r]
-            cipher.nodes[node].nodes[fwd_rc].const = rc_int[ra + r]
+            cipher.nodes[node].nodes[fwd_rk].const = rk_int[rl + r]
+            cipher.nodes[node].nodes[fwd_rc].const = rc_int[rl + r]
         # middle: S, M, AK(h0^h1), S
         node = middle_stage(cipher, node, h_xor_int, "hxor")
         node = cipher.add_subcipher(
             subcells, [(node, (i, i)) for i in range(state_nibbles)]
         )
-        # b backward keyed rounds
-        for r in range(rb):
+        # rr backward keyed rounds
+        for r in range(rr):
             node = cipher.add_subcipher(
                 bwd_round, [(node, (i, i)) for i in range(state_nibbles)]
             )
@@ -608,13 +634,13 @@ class BLINK_CVL:
         node = cipher.add_subcipher(
             subcells, [(node, (i, i)) for i in range(state_nibbles)]
         )
-        # a backward keyed rounds
-        for r in range(ra):
+        # rl backward keyed rounds
+        for r in range(rl):
             node = cipher.add_subcipher(
                 bwd_round, [(node, (i, i)) for i in range(state_nibbles)]
             )
-            cipher.nodes[node].nodes[bwd_rc].const = rc_prime_int[rb + r]
-            cipher.nodes[node].nodes[bwd_rk].const = rk_int[rb + r]
+            cipher.nodes[node].nodes[bwd_rc].const = rc_prime_int[rr + r]
+            cipher.nodes[node].nodes[bwd_rk].const = rk_int[rr + r]
         # final whitening with w1
         node = cipher.add_subcipher(
             rk_xor(w1_int), [(node, (i, i)) for i in range(state_nibbles)]
