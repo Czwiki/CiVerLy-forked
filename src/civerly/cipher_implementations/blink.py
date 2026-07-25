@@ -363,16 +363,16 @@ class BLINK_CVL:
 
         - ``name`` -- string (optional); Name of the cipher instance.
 
-        - ``rl`` -- integer (optional); Number of outer forward / inverse
-          rounds (replaces the variant's default ``ra``). Defaults to the
-          standard value for the chosen block/tweak size.
+        - ``a`` -- integer (optional); Number of outer forward / inverse
+          keyed rounds (replaces the variant's default ``ra``). Defaults to
+          the standard value for the chosen block/tweak size.
 
-        - ``rr`` -- integer (optional); Number of inner forward / inverse
-          rounds (replaces the variant's default ``rb``). Defaults to the
-          standard value for the chosen block/tweak size.
+        - ``b`` -- integer (optional); Number of inner forward / inverse
+          keyed rounds (replaces the variant's default ``rb``). Defaults to
+          the standard value for the chosen block/tweak size.
 
         - ``first_round`` -- integer (optional); 1-based index of the first
-          round to include. When provided, ``rl`` and ``rr`` are ignored and
+          round to include. When provided, ``a`` and ``b`` are ignored and
           the cipher is built as a contiguous slice of the full round
           sequence with the correct round key / constant indexing, following
           the round-counting convention described below. For Blink-64, round
@@ -427,12 +427,12 @@ class BLINK_CVL:
         sage: hex(vec_to_int(blink(int_to_vec(0, 128))))
         '0x8dc41b223bc8cd9923b1297dd27583fc'
 
-    Reduced-round instances can be built by passing ``rl`` and ``rr`` (which
+    Reduced-round instances can be built by passing ``a`` and ``b`` (which
     count *keyed* rounds ``R`` only; the middle tweak stages ``h0`` / center /
     ``h1`` are always present in this mode)::
 
         sage: from civerly.cipher_implementations.blink import BLINK_CVL
-        sage: blink = BLINK_CVL(64, 64, rl=1, rr=1)
+         sage: blink = BLINK_CVL(64, 64, a=1, b=1)
         sage: blink.is_valid
         True
 
@@ -518,7 +518,7 @@ class BLINK_CVL:
 
     """
 
-    def __init__(self, n=64, t=64, key=0, tweak=0, name=None, rl=None, rr=None,
+    def __init__(self, n=64, t=64, key=0, tweak=0, name=None, a=None, b=None,
                  first_round=None, last_round=None,
                  include_w0=None, include_w1=None):
         if name is None:
@@ -547,14 +547,14 @@ class BLINK_CVL:
             if include_w1 is None:
                 include_w1 = (last_round == total_rounds)
         else:
-            if rl is None:
-                rl = ra
-            if rr is None:
-                rr = rb
+            if a is None:
+                a = ra
+            if b is None:
+                b = rb
 
-            assert rl >= 0 and rr >= 0, "rl and rr must be non-negative"
-            assert rl + rr <= ra + rb, (
-                f"rl({rl}) + rr({rr}) exceeds available round keys/constants "
+            assert a >= 0 and b >= 0, "a and b must be non-negative"
+            assert a + b <= ra + rb, (
+                f"a({a}) + b({b}) exceeds available round keys/constants "
                 f"for this variant (max {ra + rb})"
             )
             if include_w0 is None:
@@ -683,8 +683,8 @@ class BLINK_CVL:
 
         if not slicing:
             # ----- Legacy reduced-round assembly ----------------------------
-            # rl forward keyed rounds
-            for r in range(rl):
+            # a forward keyed rounds
+            for r in range(a):
                 node = cipher.add_subcipher(
                     fwd_round, [(node, (i, i)) for i in range(state_nibbles)]
                 )
@@ -695,20 +695,20 @@ class BLINK_CVL:
             node = cipher.add_subcipher(
                 perm, [(node, (i, i)) for i in range(state_nibbles)]
             )
-            # rr forward keyed rounds
-            for r in range(rr):
+            # b forward keyed rounds
+            for r in range(b):
                 node = cipher.add_subcipher(
                     fwd_round, [(node, (i, i)) for i in range(state_nibbles)]
                 )
-                cipher.nodes[node].nodes[fwd_rk].const = rk_int[rl + r]
-                cipher.nodes[node].nodes[fwd_rc].const = rc_int[rl + r]
+                cipher.nodes[node].nodes[fwd_rk].const = rk_int[a + r]
+                cipher.nodes[node].nodes[fwd_rc].const = rc_int[a + r]
             # middle: S, M, AK(h0^h1), S
             node = middle_stage(cipher, node, h_xor_int, "hxor")
             node = cipher.add_subcipher(
                 subcells, [(node, (i, i)) for i in range(state_nibbles)]
             )
-            # rr backward keyed rounds
-            for r in range(rr):
+            # b backward keyed rounds
+            for r in range(b):
                 node = cipher.add_subcipher(
                     bwd_round, [(node, (i, i)) for i in range(state_nibbles)]
                 )
@@ -727,13 +727,13 @@ class BLINK_CVL:
             node = cipher.add_subcipher(
                 subcells, [(node, (i, i)) for i in range(state_nibbles)]
             )
-            # rl backward keyed rounds
-            for r in range(rl):
+            # a backward keyed rounds
+            for r in range(a):
                 node = cipher.add_subcipher(
                     bwd_round, [(node, (i, i)) for i in range(state_nibbles)]
                 )
-                cipher.nodes[node].nodes[bwd_rc].const = rc_prime_int[rr + r]
-                cipher.nodes[node].nodes[bwd_rk].const = rk_int[rr + r]
+                cipher.nodes[node].nodes[bwd_rc].const = rc_prime_int[b + r]
+                cipher.nodes[node].nodes[bwd_rk].const = rk_int[b + r]
         else:
             # ----- Round-sliced assembly ------------------------------------
             # Every S-box layer is one round, so the full cipher spans
