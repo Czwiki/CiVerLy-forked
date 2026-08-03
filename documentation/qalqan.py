@@ -455,12 +455,20 @@ def encrypt_block(block: bytes, key: bytes) -> bytes:
     #
 
     state = xor_bytes(state, round_keys[0])
+    state = S(state)
+    state = L(state)
 
     #
     # Middle rounds
     #
 
     for rk in round_keys[1:-1]:
+
+        #
+        # Round-key addition (mod 2^128)
+        #
+
+        state = add128(state, rk)
 
         #
         # Non-linear layer
@@ -473,19 +481,6 @@ def encrypt_block(block: bytes, key: bytes) -> bytes:
         #
 
         state = L(state)
-
-        #
-        # Round-key addition (mod 2^128)
-        #
-
-        state = add128(state, rk)
-
-    #
-    # Final round
-    #
-
-    state = S(state)
-    state = L(state)
 
     #
     # Final whitening
@@ -527,66 +522,66 @@ def pkcs7_pad(data: bytes) -> bytes:
 ###########################################################################
 
 if __name__ == "__main__":
-
-    # from report over two rounds including initial whitening
-    INPUT_DIFF  = bytes([0x06]*2 + [0x00] * 14 )
-    OUTPUT_DIFF = bytes([0x08]*2 + [0x00] * 2+[0x08]+[0x00] * 3+[0x08]+[0x00] * 3+[0x08]+[0x00] * 3)
-
-    NUM_KEYS    = 20
-    NUM_SAMPLES = 100000000        # adjust for accuracy / runtime
-
-    total_hits  = 0
-    total_tests = 0
-
-    for _ in range(NUM_KEYS):
-        #key = (0).to_bytes(32, "big")       # 256-bit key
-        key = os.urandom(32)               # 256-bit key
-        scheduler = KeyScheduler(key)
-        round_keys = scheduler.expand()
-
-        # For 2 rounds we need whitening (rk0) plus two middle rounds (rk1, rk2).
-        # round_keys[:4] makes round_keys[1:-1] contain exactly [rk1, rk2].
-        rk0, rk1, rk2 = round_keys[0], round_keys[1], round_keys[2]
-
-        local_hits = 0
-
-        for _ in range(NUM_SAMPLES):            
-            p1 = os.urandom(16)
-            p2 = xor_bytes(p1, INPUT_DIFF)
-
-            # --- whitening ---
-            s1 = xor_bytes(p1, rk0)
-            s2 = xor_bytes(p2, rk0)
-
-            # --- round 1 ---
-            s1 = S(s1);  s1 = L(s1);  s1 = add128(s1, rk1)
-            s2 = S(s2);  s2 = L(s2);  s2 = add128(s2, rk1)
-
-            # --- round 2 ---
-            s1 = S(s1);  s1 = L(s1);  s1 = add128(s1, rk2)
-            s2 = S(s2);  s2 = L(s2);  s2 = add128(s2, rk2)
-
-            if xor_bytes(s1, s2) == OUTPUT_DIFF:
-                local_hits += 1
-            total_tests += 1
-
-        result = local_hits / NUM_SAMPLES
-        total_hits += local_hits
-        
-        print("Key:", key.hex())
-        print("Pairs tested :", NUM_SAMPLES)
-        print("Hits         :", local_hits)
-        print("Probability  :", result)
-        if result > 0:
-            print("Weight (log2):", log2(result))
-        else:
-            print("Weight       : -inf")
-
-    result = total_hits / total_tests
-    print("Pairs tested :", total_tests)
-    print("Hits         :", total_hits)
-    print("Probability  :", result)
-    if result > 0:
-        print("Weight (log2):", log2(result))
-    else:
-        print("Weight       : -inf")
+    pass
+#    # from report over two rounds including initial whitening
+#    INPUT_DIFF  = bytes([0x06]*2 + [0x00] * 14 )
+#    OUTPUT_DIFF = bytes([0x08]*2 + [0x00] * 2+[0x08]+[0x00] * 3+[0x08]+[0x00] * 3+[0x08]+[0x00] * 3)
+#
+#    NUM_KEYS    = 20
+#    NUM_SAMPLES = 100000000        # adjust for accuracy / runtime
+#
+#    total_hits  = 0
+#    total_tests = 0
+#
+#    for _ in range(NUM_KEYS):
+#        #key = (0).to_bytes(32, "big")       # 256-bit key
+#        key = os.urandom(32)               # 256-bit key
+#        scheduler = KeyScheduler(key)
+#        round_keys = scheduler.expand()
+#
+#        # For 2 rounds we need whitening (rk0) plus two middle rounds (rk1, rk2).
+#        # round_keys[:4] makes round_keys[1:-1] contain exactly [rk1, rk2].
+#        rk0, rk1, rk2 = round_keys[0], round_keys[1], round_keys[2]
+#
+#        local_hits = 0
+#
+#        for _ in range(NUM_SAMPLES):            
+#            p1 = os.urandom(16)
+#            p2 = xor_bytes(p1, INPUT_DIFF)
+#
+#            # --- whitening ---
+#            s1 = xor_bytes(p1, rk0) ; s1= S(s1);  s1 = L(s1)
+#            s2 = xor_bytes(p2, rk0) ; s2= S(s2);  s2 = L(s2)
+#
+#            # --- round 1 ---
+#            s1 = S(s1);  s1 = L(s1);  s1 = add128(s1, rk1)
+#            s2 = S(s2);  s2 = L(s2);  s2 = add128(s2, rk1)
+#
+#            # --- round 2 ---
+#            s1 = S(s1);  s1 = L(s1);  s1 = add128(s1, rk2)
+#            s2 = S(s2);  s2 = L(s2);  s2 = add128(s2, rk2)
+#
+#            if xor_bytes(s1, s2) == OUTPUT_DIFF:
+#                local_hits += 1
+#            total_tests += 1
+#
+#        result = local_hits / NUM_SAMPLES
+#        total_hits += local_hits
+#        
+#        print("Key:", key.hex())
+#        print("Pairs tested :", NUM_SAMPLES)
+#        print("Hits         :", local_hits)
+#        print("Probability  :", result)
+#        if result > 0:
+#            print("Weight (log2):", log2(result))
+#        else:
+#            print("Weight       : -inf")
+#
+#    result = total_hits / total_tests
+#    print("Pairs tested :", total_tests)
+#    print("Hits         :", total_hits)
+#    print("Probability  :", result)
+#    if result > 0:
+#        print("Weight (log2):", log2(result))
+#    else:
+#        print("Weight       : -inf")
