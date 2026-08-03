@@ -531,6 +531,7 @@ def pkcs7_pad(data: bytes) -> bytes:
 ###########################################################################
 
 if __name__ == "__main__":
+    pass
 #    # from report over two rounds including initial whitening
 #    INPUT_DIFF  = bytes([0x06]*2 + [0x00] * 14 )
 #    OUTPUT_DIFF = bytes([0x08]*2 + [0x00] * 2+[0x08]+[0x00] * 3+[0x08]+[0x00] * 3+[0x08]+[0x00] * 3)
