@@ -408,11 +408,20 @@ class KeyScheduler:
     def expand(self):
         """
         Generate all round keys.
+
+        The encryption function (§3.4.1) requires one additional key
+        on top of the nominal round count *N*:
+
+            * ``rk[0]``   – start whitening (XOR)
+            * ``rk[1..N-1]`` – N-1 middle rounds (mod 2^128 addition)
+            * ``rk[N]``   – final whitening (XOR)
+
+        Therefore ``expand()`` yields **N + 1** keys.
         """
 
         keys = []
 
-        for _ in range(self.rounds):
+        for _ in range(self.rounds + 1):
             keys.append(self.next_round_key())
 
         return keys
@@ -451,7 +460,7 @@ def encrypt_block(block: bytes, key: bytes) -> bytes:
     state = bytes(block)
 
     #
-    # Initial whitening
+    # first round
     #
 
     state = xor_bytes(state, round_keys[0])
@@ -522,7 +531,6 @@ def pkcs7_pad(data: bytes) -> bytes:
 ###########################################################################
 
 if __name__ == "__main__":
-    pass
 #    # from report over two rounds including initial whitening
 #    INPUT_DIFF  = bytes([0x06]*2 + [0x00] * 14 )
 #    OUTPUT_DIFF = bytes([0x08]*2 + [0x00] * 2+[0x08]+[0x00] * 3+[0x08]+[0x00] * 3+[0x08]+[0x00] * 3)
