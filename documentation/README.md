@@ -66,7 +66,32 @@ Pitfall: overlapping or missing edges often produce silently wrong behavior or `
 
 Pitfall: if you do not call `add_output` for all outputs, `is_valid` remains false and evaluation/modeling fails.
 
-## 4) Model-friendly component choices
+## 4) Sliceable round construction
+
+Design the cipher so that individual rounds or round ranges can be extracted for isolated analysis. This is essential for analyzing truncated differentials, bounding probabilities over specific round intervals, or comparing trails across partial cipher variants.
+
+Slicing parameters:
+
+- The constructor may keep an `R` parameter that sets the total number of rounds.
+- It must also be possible to specify a round range through a `start` and an `end` parameter. These two parameters must always be accepted together; a constructor that accepts only one of them is not allowed.
+- `R` and the pair `(start, end)` are mutually exclusive: if `start` and `end` are provided, `R` must not be used to override the range, and vice versa. The constructor should raise an error when both are given together.
+- The cipher must be sliceable. Preferably this is achieved directly through the `start` and `end` constructor parameters. Depending on the cipher structure, an equivalent technique (for example a dedicated slicing helper or explicit round-indexed DAG construction) may be more suitable, but the user-facing API must still allow extraction of a contiguous round range without manual DAG rewiring.
+
+Guidelines:
+
+- Build each round as a named subcipher so that round boundaries are explicit in the DAG. Avoid flattening multiple rounds into a single anonymous subcipher.
+- If the round function is uniform, construct it once and add it repeatedly with `add_subcipher`, but ensure each instantiation is wired independently so tools can slice between any two round nodes.
+- Provide an `R` parameter (total number of rounds) and document whether the constructor accepts `start`/`end` or if slicing is done through another mechanism.
+- When adding outputs, ensure intermediate round states can be exposed if the analysis tool supports it. At minimum, the final round must terminate with `add_output`.
+- If round constants or keys vary per round, store them in a list indexed by round number so that a slice from round `r_start` to round `r_end` can retrieve the correct constants without recomputing the full schedule.
+
+Round slicing in practice:
+
+- Some modeling pipelines expect a contiguous subgraph from round `a` to round `b`. Keeping the DAG layered by round makes this extraction straightforward.
+- If the cipher has an initial or final whitening layer, model these as separate subciphers (or as round 0 and round `R+1`) so they do not interfere with round-indexed slicing.
+- Test slicing by extracting a sub-cipher for rounds 2–9 (or 1–10) and verifying that `is_valid` remains true and that test vectors for the full cipher can be reproduced by composing the slices.
+
+## 5) Model-friendly component choices
 
 Use CiVerLy components whenever possible to keep compatibility with modeling:
 
@@ -101,6 +126,12 @@ Suggested practice:
 
 Decide whether the key schedule is modeled explicitly. If you only need fixed-round testing or do not analyze related-key behavior, use constants in `RoundkeyXOR_CVL` and pass `rks` to the constructor. If the key schedule matters to your analysis, model it as a dedicated subcipher instead of hard-coding the constants in the round function.
 
+Key schedule encapsulation:
+
+- Implement the key schedule as a class method. This method should only be usable from the constructor or from other internal helper functions; it is not part of the public cipher API.
+- The constructor should accept a master key (`master_key`), from which the round keys are derived using the internal key-schedule method.
+- Providing a master key and providing explicit round keys (`rks`) are mutually exclusive. The constructor must raise an error when both are supplied.
+
 Practical rule: if the examples in `skinny.py` or `abc.py` set round constants on a node before each round, follow that pattern; if the round key is fixed and externally known, a constant XOR is usually enough.
 
 ## 7) Provide tests and examples
@@ -133,7 +164,13 @@ from civerly.component import SBox_CVL, PermuteLayer_CVL
 from sage.crypto.sbox import SBox
 
 class TOYCIPHER_CVL:
-    def __init__(self, R=4, rks=None, name=None):
+    def __init__(self, R=4, start=1, end=None, master_key=None, rks=None, name=None):
+        if end is None:
+            end = R
+        if start is not None and end is not None and R != end - start + 1:
+            raise ValueError("R cannot be combined with an explicit (start, end) range")
+        if master_key is not None and rks is not None:
+            raise ValueError("master_key and rks are mutually exclusive")
         if rks is None:
             rks = [0x0 for _ in range(R)]
         if name is None:
@@ -194,6 +231,8 @@ The generated reports also follow the same distinction: AESlike models are rende
 - Passing a non-binary matrix into `LinearLayer_CVL` or a linear layer whose dimensions do not match the state layout.
 - Forgetting that AES-like linear layers must be column-aligned and sized to one state column.
 - Treating `get_trail()` output as trustworthy when `Unnamed Component` still appears; that usually means a naming or wiring problem remains.
+- Combining `R` with `start`/`end` in the constructor instead of making them mutually exclusive.
+- Supplying both `master_key` and `rks` to the constructor instead of choosing one key input path.
 
 ## 11) Where to look for examples
 
