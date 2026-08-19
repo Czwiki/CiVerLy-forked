@@ -1,6 +1,6 @@
 /*From https://gist.github.com/raullenchai/2712516*/
 
-include <stdio.h>
+#include <stdio.h>
 
 /*
 Fork From http://www.cs.technion.ac.il/~orrd/KATAN/katan.c
