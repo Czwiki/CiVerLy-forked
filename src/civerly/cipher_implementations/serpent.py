@@ -13,7 +13,7 @@ EXAMPLES::
 
     sage: from civerly.cipher_implementations.serpent import SERPENT_CVL
     sage: from civerly.util import int_to_vec, vec_to_int
-    sage: serpent = SERPENT_CVL(key=0, keylen=128)
+    sage: serpent = SERPENT_CVL(master_key=0, keylen=128)
     sage: pt = int('8ED77392F29990EDA7A3A3CE6F579DD2', 16)
     sage: ct = vec_to_int(serpent(int_to_vec(pt, 128)))
     sage: hex(ct)
@@ -95,11 +95,11 @@ def _apply_perm_int(x, perm):
 # ---------------------------------------------------------------------------
 # Key schedule
 # ---------------------------------------------------------------------------
-def serpent_key_schedule(key, keylen=128, R=32):
+def serpent_key_schedule(master_key, keylen=128, R=32):
     r"""
     Generate round keys for the Serpent block cipher.
 
-    Serpent requires 33 128-bit subkeys. The user key is first padded to
+    Serpent requires 33 128-bit subkeys. The master key is first padded to
     256 bits if necessary, then expanded to 132 prekey words via an affine
     recurrence, and finally transformed by the S-boxes in bitslice mode.
     After the bitslice round key words are produced, the initial
@@ -111,7 +111,7 @@ def serpent_key_schedule(key, keylen=128, R=32):
 
     INPUT:
 
-        - ``key`` -- integer; The user-supplied key.
+        - ``master_key`` -- integer; The user-supplied master key.
 
         - ``keylen`` -- integer (default: ``128``); The key length in bits.
           Must be at most ``256``.
@@ -162,9 +162,9 @@ def serpent_key_schedule(key, keylen=128, R=32):
         raise ValueError("Serpent only supports up to 32 rounds")
 
     if keylen < 256:
-        key = int(key) | (1 << keylen)
+        key = int(master_key) | (1 << keylen)
     else:
-        key = int(key)
+        key = int(master_key)
 
     # Split 256 key bits into 8 little-endian words.
     w_init = [(key >> (32 * i)) & 0xffffffff for i in range(8)]
@@ -403,26 +403,28 @@ class SERPENT_CVL:
 
     INPUT::
 
-        - ``R`` -- integer; Number of rounds (default: ``32``).
+        - ``R`` -- integer; Number of rounds (default: ``32``). Mutually
+          exclusive with an explicit ``(start, end)`` range.
 
         - ``rks`` -- list (optional); Specifies the round key values.
           Must have length ``R+1`` (33 keys for full-round Serpent).
-          Defaults to all zeros.
+          Defaults to all zeros. May not be combined with ``master_key``.
 
-        - ``key`` -- integer (optional); A master key from which round keys
-          are derived via :func:`serpent_key_schedule`. Ignored if ``rks``
-          is provided.
+        - ``master_key`` -- integer (optional); A master key from which round
+          keys are derived via :func:`serpent_key_schedule`. May not be
+          combined with ``rks``.
 
-        - ``keylen`` -- integer (default: ``128``); Length of ``key`` in bits.
+        - ``keylen`` -- integer (default: ``128``); Length of ``master_key`` in bits.
 
         - ``name`` -- string (optional); The name of the cipher.
 
-        - ``first_round`` -- integer (default: ``0``); The first Serpent round
-          to include. Use this to construct a reduced-round cipher starting at
-          a later round (e.g. ``first_round=4`` for the attack on rounds 4--10).
+        - ``start`` -- integer (default: ``0``); The first Serpent round to
+          include, indexed from 0. Use this to construct a reduced-round cipher
+          starting at a later round (e.g. ``start=4`` for an attack on rounds
+          4--10). Must be provided together with ``end``.
 
-        - ``last_round`` -- integer (optional); The last Serpent round to
-          include. If given, ``R`` is computed as ``last_round - first_round + 1``.
+        - ``end`` -- integer (optional); The last Serpent round to include,
+          indexed from 0. If given, ``R`` is computed as ``end - start + 1``.
 
     EXAMPLES::
 
@@ -431,7 +433,7 @@ class SERPENT_CVL:
 
             sage: from civerly.cipher_implementations.serpent import SERPENT_CVL
             sage: from civerly.util import int_to_vec, vec_to_int
-            sage: serpent = SERPENT_CVL(key=0, keylen=128)
+            sage: serpent = SERPENT_CVL(master_key=0, keylen=128)
             sage: pt1 = int('8ED77392F29990EDA7A3A3CE6F579DD2', 16)
             sage: hex(vec_to_int(serpent(int_to_vec(pt1, 128))))
             '0x2d99fd0696ced14886b0e88a968b28b2'
@@ -444,7 +446,7 @@ class SERPENT_CVL:
 
         Instantiate with a master key (round keys are derived automatically)::
 
-            sage: serpent = SERPENT_CVL(R=1, key=0, keylen=128)
+            sage: serpent = SERPENT_CVL(R=1, master_key=0, keylen=128)
             sage: result = serpent(int_to_vec(0x0, 128))
             sage: vec_to_int(result) > 0
             True
@@ -455,7 +457,7 @@ class SERPENT_CVL:
         keeps its linear transformation (only the true final round, 31,
         would receive an extra key XOR instead).::
 
-            sage: serpent = SERPENT_CVL(key=0, keylen=128, first_round=4, last_round=10)
+            sage: serpent = SERPENT_CVL(master_key=0, keylen=128, start=4, end=10)
             sage: result = serpent(int_to_vec(0x0, 128))
             sage: vec_to_int(result) > 0
             True
@@ -470,12 +472,31 @@ class SERPENT_CVL:
         Backward-compatible reduced-round cipher (R=7) still ends with the
         final key XOR and FP::
 
-            sage: serpent = SERPENT_CVL(key=0, keylen=128, R=7)
+            sage: serpent = SERPENT_CVL(master_key=0, keylen=128, R=7)
             sage: names = [n.name for n in serpent.nodes]
             sage: 'FP' in names
             True
             sage: names.count('LT')
             6
+
+        ``R`` and ``(start, end)`` are mutually exclusive, and ``start``/``end``
+        must be supplied together::
+
+            sage: SERPENT_CVL(R=7, start=4, end=10)
+            Traceback (most recent call last):
+            ...
+            ValueError: R cannot be combined with an explicit (start, end) range
+            sage: SERPENT_CVL(start=4)
+            Traceback (most recent call last):
+            ...
+            ValueError: start and end must be provided together
+
+        ``master_key`` and ``rks`` are mutually exclusive::
+
+            sage: SERPENT_CVL(master_key=0, rks=[0] * 34)
+            Traceback (most recent call last):
+            ...
+            ValueError: master_key and rks are mutually exclusive
 
         Model the cipher with MILP::
 
@@ -498,29 +519,39 @@ class SERPENT_CVL:
 
     """
 
-    def __init__(self, R=32, rks=None, key=None, keylen=128, name=None, first_round=0, last_round=None):
+    def __init__(self, R=32, rks=None, master_key=None, keylen=128, name=None, start=0, end=None):
         if name is None:
             name = "SERPENT"
 
-        if last_round is not None:
-            R = last_round - first_round + 1
+        if master_key is not None and rks is not None:
+            raise ValueError("master_key and rks are mutually exclusive")
+
+        explicit_slice = (end is not None)
+        if explicit_slice and R != 32:
+            raise ValueError("R cannot be combined with an explicit (start, end) range")
+        if not explicit_slice and start != 0:
+            raise ValueError("start and end must be provided together")
+        if end is None:
+            end = start + R - 1
+        else:
+            R = end - start + 1
 
         if R > 32:
             raise ValueError("Serpent only supports up to 32 rounds")
-        if first_round < 0 or first_round + R - 1 >= 32:
+        if start < 0 or end >= 32:
             raise ValueError("Invalid round range for Serpent")
 
-        # exact_slice: build the exact internal data path for the chosen
-        # round range.  In this mode IP/FP are omitted unless the slice
-        # reaches the real cipher boundaries, and every round keeps its
-        # original LT except the true final round (31).
-        exact_slice = (first_round != 0 or last_round is not None)
-        effective_last_round = last_round if last_round is not None else first_round + R - 1
+        # exact_slice: build the exact internal data path when the caller
+        # explicitly requested a round range via (start, end).  In this mode
+        # IP/FP are omitted unless the slice reaches the real cipher
+        # boundaries, and every selected round keeps its original LT except
+        # the true final round (31).
+        exact_slice = explicit_slice
 
         if rks is None:
-            if key is not None:
-                full_rks = serpent_key_schedule(key, keylen=keylen, R=32)
-                rks = full_rks[first_round:first_round + R + 1]
+            if master_key is not None:
+                full_rks = serpent_key_schedule(master_key, keylen=keylen, R=32)
+                rks = full_rks[start:start + R + 1]
             else:
                 rks = [0 for _ in range(R + 1)]
         elif len(rks) < R + 1:
@@ -550,7 +581,7 @@ class SERPENT_CVL:
         cipher = SBoxCipher(128, 128, name=name)
 
         # Initial permutation: standard -> standard-permuted (bitslice)
-        if not exact_slice or first_round == 0:
+        if not exact_slice or start == 0:
             ip = PermuteLayer_CVL(FP_TABLE, name="IP")
             current = cipher.add_subcipher(
                 ip, [(cipher.IN, (i, i)) for i in range(128)]
@@ -559,7 +590,7 @@ class SERPENT_CVL:
             current = cipher.IN
 
         for r in range(R):
-            round_num = first_round + r
+            round_num = start + r
             # Key addition
             key_add = RoundkeyXOR_CVL(128, rks[r], name=f"K{round_num}")
             current = cipher.add_subcipher(
@@ -597,7 +628,7 @@ class SERPENT_CVL:
                 )
 
         # Final permutation: standard-permuted -> standard
-        if not exact_slice or effective_last_round == 31:
+        if not exact_slice or end == 31:
             fp = PermuteLayer_CVL(IP_TABLE, name="FP")
             current = cipher.add_subcipher(
                 fp, [(current, (i, i)) for i in range(128)]
