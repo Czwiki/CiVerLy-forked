@@ -371,23 +371,24 @@ class BLINK_CVL:
           keyed rounds (replaces the variant's default ``rb``). Defaults to
           the standard value for the chosen block/tweak size.
 
-        - ``first_round`` -- integer (optional); 1-based index of the first
-          round to include. When provided, ``a`` and ``b`` are ignored and
-          the cipher is built as a contiguous slice of the full round
-          sequence with the correct round key / constant indexing. Useful
-          for isolating Superbox trails (e.g. ``first_round=3`` starts at
-          the input to Round 3, i.e. immediately after the ``h0`` stage).
+        - ``start`` -- integer (optional); 1-based index of the first
+          S-box layer to include. When provided, ``a`` and ``b`` only
+          determine the variant's keyed-round budget; the slice is built
+          over the full sequence of S-box layers (keyed rounds plus the
+          four structural middle S-box layers). Useful for isolating
+          Superbox trails (e.g. ``start=4`` starts at the input to the
+          ``h0`` middle stage).
 
-        - ``last_round`` -- integer (optional); 1-based index of the last
-          round to include (must be given together with ``first_round``).
+        - ``end`` -- integer (optional); 1-based index of the last
+          S-box layer to include (must be given together with ``start``).
 
         - ``include_w0`` -- bool (optional); Whether to prepend the initial
-          whitening ``w0``. Defaults to ``True`` when ``first_round`` is
+          whitening ``w0``. Defaults to ``True`` when ``start`` is
           ``1`` or ``None``, otherwise ``False``.
 
         - ``include_w1`` -- bool (optional); Whether to append the final
-          whitening ``w1``. Defaults to ``True`` when ``last_round`` equals
-          the total number of rounds (or when ``first_round`` is ``None``),
+          whitening ``w1``. Defaults to ``True`` when ``end`` equals the
+          total number of S-box layers (or when ``start`` is ``None``),
           otherwise ``False``.
 
     The test vectors below are taken from ``documentation/blink test
@@ -435,17 +436,30 @@ class BLINK_CVL:
         sage: blink.is_valid
         True
 
-    Sliced instances are built with ``first_round`` / ``last_round``. For
-    Blink-64 the 10 rounds are numbered ``1 … 10``. Rounds ``1–2`` are the
-    outer forward block, ``3–5`` the inner forward block, ``6–8`` the inner
-    backward block and ``9–10`` the outer backward block. The middle ``h0``
-    stage sits between rounds ``2`` and ``3``, ``hxor`` between ``5`` and
-    ``6``, and ``h1`` between ``8`` and ``9``. The following example
-    constructs the 4-round core (rounds ``3`` through ``6``) used in the
-    Superbox experiments of the paper::
+    Sliced instances are built with ``start`` / ``end``. Rounds are
+    numbered by S-box layer; for the default Blink-64 variant this gives
+    ``1 … 14``. Rounds ``1–2`` are the outer forward block, rounds ``4–6``
+    the inner forward block, rounds ``9–11`` the inner backward block and
+    rounds ``13–14`` the outer backward block. The structural middle
+    stages are numbered as rounds too: ``3`` is ``h0`` (S, M, AK(h0), P),
+    ``7`` and ``8`` are the two S-boxes of ``hxor`` (with the MixColumn
+    and constant XOR between them), and ``12`` is ``h1`` (P^-1, AK(h1),
+    M, S). The full sliced cipher reproduces the published test vector::
 
         sage: from civerly.cipher_implementations.blink import BLINK_CVL
-        sage: core = BLINK_CVL(64, 64, first_round=3, last_round=6)
+        sage: from civerly.util import int_to_vec, vec_to_int
+        sage: key = 0xd6a102d888a467e4d1d7dec33a246943e07c1dc6f302c57e762c2df9de6f0d216dd387874a0b52ce3022e0ad78c78a0697779021b38e7fa1
+        sage: blink = BLINK_CVL(64, 64, key=key, tweak=0x0123456789abcdef, start=1, end=14)
+        sage: hex(vec_to_int(blink(int_to_vec(0, 64))))
+        '0xa4a0d10502be846e'
+
+    A single S-box layer can also be isolated, and a sliced core can be
+    used in Superbox-style experiments::
+
+        sage: from civerly.cipher_implementations.blink import BLINK_CVL
+        sage: from civerly.util import int_to_vec, vec_to_int
+        sage: key = 0xd6a102d888a467e4d1d7dec33a246943e07c1dc6f302c57e762c2df9de6f0d216dd387874a0b52ce3022e0ad78c78a0697779021b38e7fa1
+        sage: core = BLINK_CVL(64, 64, key=key, tweak=0x0123456789abcdef, start=7, end=8)
         sage: core.is_valid
         True
 
@@ -486,7 +500,7 @@ class BLINK_CVL:
     """
 
     def __init__(self, n=64, t=64, key=0, tweak=0, name=None, a=None, b=None,
-                 first_round=None, last_round=None,
+                 start=None, end=None,
                  include_w0=None, include_w1=None):
         if name is None:
             name = f"Blink-{n}"
@@ -499,20 +513,23 @@ class BLINK_CVL:
         )
 
         # Determine whether we are in slicing mode or legacy reduced-round mode.
-        slicing = first_round is not None
+        slicing = start is not None
+        # Total number of S-box layers for slicing: keyed rounds plus the
+        # four structural middle S-box layers (h0, the two S-boxes in hxor,
+        # and the h1 S-box).
+        total_sbox_rounds = 2 * (ra + rb) + 4
         if slicing:
-            assert last_round is not None, (
-                "last_round must be provided when first_round is set"
+            assert end is not None, (
+                "end must be provided when start is set"
             )
-            total_rounds = 2 * (ra + rb)
-            assert 1 <= first_round <= last_round <= total_rounds, (
-                f"first_round={first_round}, last_round={last_round} are "
-                f"out of range for this variant (1..{total_rounds})"
+            assert 1 <= start <= end <= total_sbox_rounds, (
+                f"start={start}, end={end} are "
+                f"out of range for this variant (1..{total_sbox_rounds})"
             )
             if include_w0 is None:
-                include_w0 = (first_round == 1)
+                include_w0 = (start == 1)
             if include_w1 is None:
-                include_w1 = (last_round == total_rounds)
+                include_w1 = (end == total_sbox_rounds)
         else:
             if a is None:
                 a = ra
@@ -703,8 +720,25 @@ class BLINK_CVL:
                 cipher.nodes[node].nodes[bwd_rk].const = rk_int[b + r]
         else:
             # ----- Round-sliced assembly ------------------------------------
-            total_rounds = 2 * (ra + rb)
-            for r in range(first_round, last_round + 1):
+            # We number every S-box layer as a round. The sequence of
+            # S-box layers for the full cipher is:
+            #
+            #   1..a              : forward keyed rounds
+            #   a+1               : h0 middle stage (S, M, AK(h0))
+            #   a+2 .. a+b+1      : forward inner keyed rounds
+            #   a+b+2             : first S-box of hxor stage
+            #   a+b+3             : second S-box of hxor stage
+            #   a+b+4 .. a+2b+3   : backward inner keyed rounds
+            #   a+2b+4            : h1 middle stage S-box (P^-1, AK(h1), M, S)
+            #   a+2b+5 .. 2a+2b+4 : backward outer keyed rounds
+            #
+            # If the slice starts inside a multi-S-box middle stage, it is
+            # built from that S-box forward (the preceding operations of the
+            # stage are omitted). If the slice ends inside such a stage, the
+            # trailing operations are omitted and the slice terminates after
+            # that S-box.
+            total_rounds = total_sbox_rounds
+            for r in range(start, end + 1):
                 if 1 <= r <= ra:
                     # Forward outer round
                     idx = r - 1
@@ -713,43 +747,48 @@ class BLINK_CVL:
                     )
                     cipher.nodes[node].nodes[fwd_rk].const = rk_int[idx]
                     cipher.nodes[node].nodes[fwd_rc].const = rc_int[idx]
-                elif ra + 1 <= r <= ra + rb:
+                elif r == ra + 1:
+                    # h0 middle stage (always followed by the permutation
+                    # that leads to the next round)
+                    node = middle_stage(cipher, node, h0_int, "h0")
+                    node = cipher.add_subcipher(
+                        perm, [(node, (i, i)) for i in range(state_nibbles)]
+                    )
+                elif ra + 2 <= r <= ra + rb + 1:
                     # Forward inner round
-                    idx = r - 1
+                    idx = r - 2
                     node = cipher.add_subcipher(
                         fwd_round, [(node, (i, i)) for i in range(state_nibbles)]
                     )
                     cipher.nodes[node].nodes[fwd_rk].const = rk_int[idx]
                     cipher.nodes[node].nodes[fwd_rc].const = rc_int[idx]
-                elif ra + rb + 1 <= r <= ra + 2 * rb:
-                    # Backward inner round
-                    idx = r - (ra + rb + 1)
-                    node = cipher.add_subcipher(
-                        bwd_round, [(node, (i, i)) for i in range(state_nibbles)]
-                    )
-                    cipher.nodes[node].nodes[bwd_rc].const = rc_prime_int[idx]
-                    cipher.nodes[node].nodes[bwd_rk].const = rk_int[idx]
-                else:
-                    # Backward outer round
-                    idx = r - (ra + rb + 1)
-                    node = cipher.add_subcipher(
-                        bwd_round, [(node, (i, i)) for i in range(state_nibbles)]
-                    )
-                    cipher.nodes[node].nodes[bwd_rc].const = rc_prime_int[idx]
-                    cipher.nodes[node].nodes[bwd_rk].const = rk_int[idx]
-
-                # Insert middle stages when the slice crosses a boundary.
-                if r == ra and r < last_round:
-                    node = middle_stage(cipher, node, h0_int, "h0")
-                    node = cipher.add_subcipher(
-                        perm, [(node, (i, i)) for i in range(state_nibbles)]
-                    )
-                elif r == ra + rb and r < last_round:
-                    node = middle_stage(cipher, node, h_xor_int, "hxor")
+                elif r == ra + rb + 2:
+                    # First S-box of the hxor stage: SubCells only.
                     node = cipher.add_subcipher(
                         subcells, [(node, (i, i)) for i in range(state_nibbles)]
                     )
-                elif r == ra + 2 * rb and r < last_round:
+                    if r < end:
+                        node = cipher.add_subcipher(
+                            mixcolumns, [(node, (i, i)) for i in range(state_nibbles)]
+                        )
+                        node = cipher.add_subcipher(
+                            rk_xor(h_xor_int), [(node, (i, i)) for i in range(state_nibbles)]
+                        )
+                elif r == ra + rb + 3:
+                    # Second S-box of the hxor stage
+                    node = cipher.add_subcipher(
+                        subcells, [(node, (i, i)) for i in range(state_nibbles)]
+                    )
+                elif ra + rb + 4 <= r <= ra + 2 * rb + 3:
+                    # Backward inner round
+                    idx = r - (ra + rb + 4)
+                    node = cipher.add_subcipher(
+                        bwd_round, [(node, (i, i)) for i in range(state_nibbles)]
+                    )
+                    cipher.nodes[node].nodes[bwd_rc].const = rc_prime_int[idx]
+                    cipher.nodes[node].nodes[bwd_rk].const = rk_int[idx]
+                elif r == ra + 2 * rb + 4:
+                    # h1 middle stage S-box (P^-1, AK(h1), M, S)
                     node = cipher.add_subcipher(
                         inv_perm, [(node, (i, i)) for i in range(state_nibbles)]
                     )
@@ -762,6 +801,14 @@ class BLINK_CVL:
                     node = cipher.add_subcipher(
                         subcells, [(node, (i, i)) for i in range(state_nibbles)]
                     )
+                else:
+                    # Backward outer round
+                    idx = r - (ra + rb + 5)
+                    node = cipher.add_subcipher(
+                        bwd_round, [(node, (i, i)) for i in range(state_nibbles)]
+                    )
+                    cipher.nodes[node].nodes[bwd_rc].const = rc_prime_int[idx]
+                    cipher.nodes[node].nodes[bwd_rk].const = rk_int[idx]
 
         if include_w1:
             node = cipher.add_subcipher(

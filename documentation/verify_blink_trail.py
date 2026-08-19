@@ -9,7 +9,7 @@ reference encryption and structural weight checks.
 
 Run from the repo root::
 
-    sage verify_blink_trail.py [first_round] [last_round]
+    sage verify_blink_trail.py [start] [end]
 
 Examples::
 
@@ -158,9 +158,9 @@ def empirical_full_cipher_check(input_diff_int, key_int=0, tweak_int=0):
 # Main analysis
 # ---------------------------------------------------------------------------
 
-def analyze_slice(first_round, last_round, key_int=0, tweak_int=0):
+def analyze_slice(start, end, key_int=0, tweak_int=0):
     print("=" * 72)
-    print(f"Blink-64 slice  Rounds {first_round}–{last_round}")
+    print(f"Blink-64 slice  Rounds {start}–{end}")
     print(f"Master key = 0x{key_int:0144x}" if key_int else "Master key = 0 (all-zero)")
     print(f"Tweak      = 0x{tweak_int:016x}" if tweak_int else "Tweak      = 0 (weak-key regime)")
     print("=" * 72)
@@ -169,9 +169,9 @@ def analyze_slice(first_round, last_round, key_int=0, tweak_int=0):
         64, 64,
         key=key_int,
         tweak=tweak_int,
-        first_round=first_round,
-        last_round=last_round,
-        name=f"blink_R{first_round}-{last_round}",
+        start=start,
+        end=end,
+        name=f"blink_R{start}-{end}",
     )
     print(f"\nCipher graph valid: {cipher.is_valid}")
 
