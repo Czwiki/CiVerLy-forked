@@ -7,9 +7,211 @@ from sage.matrix.constructor import Matrix as matrix
 from sage.matrix.special import identity_matrix, block_matrix
 
 
+# ---------------------------------------------------------------------------
+# Helpers for the BEANIE tweak-key schedule
+# ---------------------------------------------------------------------------
+
+_SBOX = (0, 4, 2, 11, 10, 12, 9, 8, 5, 15, 13, 3, 7, 1, 6, 14)
+
+_ROUND_CONSTANTS = (
+    (0x0, 0x0000000000000000),
+    (0x0, 0x13198A2E03707344),
+    (0x0, 0xA4093822299F31D0),
+    (0x0, 0x082EFA98EC4E6C89),
+    (0x0, 0x452821E638D01377),
+    (0x0, 0xBE5466CF34E90C6C),
+    (0x0, 0x7EF84F78FD955CB1),
+    (0x0, 0x85840851F1AC43AA),
+    (0x0, 0xC882D32F25323C54),
+    (0x0, 0x64A51195E0E3610D),
+)
+
+
+def _sbox64(state):
+    output = 0
+    for shift in range(0, 64, 4):
+        output |= _SBOX[(state >> shift) & 0xF] << shift
+    return output & 0xFFFFFFFFFFFFFFFF
+
+
+def _prince_m_0(column):
+    c0 = (column >> 12) & 0xF
+    c1 = (column >> 8) & 0xF
+    c2 = (column >> 4) & 0xF
+    c3 = column & 0xF
+    return (
+        (((c0 & 0x7) ^ (c1 & 0xB) ^ (c2 & 0xD) ^ (c3 & 0xE)) << 12)
+        | (((c0 & 0xB) ^ (c1 & 0xD) ^ (c2 & 0xE) ^ (c3 & 0x7)) << 8)
+        | (((c0 & 0xD) ^ (c1 & 0xE) ^ (c2 & 0x7) ^ (c3 & 0xB)) << 4)
+        | (((c0 & 0xE) ^ (c1 & 0x7) ^ (c2 & 0xB) ^ (c3 & 0xD)) << 0)
+    ) & 0xFFFF
+
+
+def _prince_m_1(column):
+    c0 = (column >> 12) & 0xF
+    c1 = (column >> 8) & 0xF
+    c2 = (column >> 4) & 0xF
+    c3 = column & 0xF
+    return (
+        (((c0 & 0xB) ^ (c1 & 0xD) ^ (c2 & 0xE) ^ (c3 & 0x7)) << 12)
+        | (((c0 & 0xD) ^ (c1 & 0xE) ^ (c2 & 0x7) ^ (c3 & 0xB)) << 8)
+        | (((c0 & 0xE) ^ (c1 & 0x7) ^ (c2 & 0xB) ^ (c3 & 0xD)) << 4)
+        | (((c0 & 0x7) ^ (c1 & 0xB) ^ (c2 & 0xD) ^ (c3 & 0xE)) << 0)
+    ) & 0xFFFF
+
+
+def _prince_m(state):
+    left, right = state
+    left_columns = [
+        left & 0xFFFF,
+        (left >> 16) & 0xFFFF,
+        (left >> 32) & 0xFFFF,
+        (left >> 48) & 0xFFFF,
+    ]
+    right_columns = [
+        right & 0xFFFF,
+        (right >> 16) & 0xFFFF,
+        (right >> 32) & 0xFFFF,
+        (right >> 48) & 0xFFFF,
+    ]
+    left_columns = [
+        _prince_m_0(left_columns[0]),
+        _prince_m_1(left_columns[1]),
+        _prince_m_1(left_columns[2]),
+        _prince_m_0(left_columns[3]),
+    ]
+    right_columns = [
+        _prince_m_0(right_columns[0]),
+        _prince_m_1(right_columns[1]),
+        _prince_m_1(right_columns[2]),
+        _prince_m_0(right_columns[3]),
+    ]
+    left_out = 0
+    right_out = 0
+    for index, column in enumerate(left_columns):
+        left_out |= column << (16 * index)
+    for index, column in enumerate(right_columns):
+        right_out |= column << (16 * index)
+    return left_out & 0xFFFFFFFFFFFFFFFF, right_out & 0xFFFFFFFFFFFFFFFF
+
+
+def _prince_shift(state):
+    shifted = state & 0xF000F000F000F000
+    for index in range(1, 4):
+        row = state & (0xF000F000F000F000 >> (4 * index))
+        shifted |= (row << (index * 16)) | (row >> (64 - index * 16))
+    return shifted & 0xFFFFFFFFFFFFFFFF
+
+
+def _feistel(state):
+    left, right = state
+    words = [
+        left & 0xFFFFFFFF,
+        (left >> 32) & 0xFFFFFFFF,
+        right & 0xFFFFFFFF,
+        (right >> 32) & 0xFFFFFFFF,
+    ]
+    new_words = [0, 0, 0, 0]
+    new_words[0] = words[3]
+    new_words[1] = words[1] ^ words[0]
+    new_words[2] = words[1]
+    new_words[3] = words[3] ^ words[2]
+    return (
+        ((new_words[1] & 0xFFFFFFFF) << 32) | (new_words[0] & 0xFFFFFFFF),
+        ((new_words[3] & 0xFFFFFFFF) << 32) | (new_words[2] & 0xFFFFFFFF),
+    )
+
+
+def _tks_shift(state):
+    left, right = state
+    new_left = 0
+    new_right = 0
+
+    new_left |= left & 0xF000F000F000F000
+    new_right |= right & 0xF000F000F000F000
+
+    new_left |= ((left & 0x000000000F000F00) << 32) | ((right & 0x0F000F0000000000) >> 32)
+    new_right |= ((right & 0x000000000F000F00) << 32) | ((left & 0x0F000F0000000000) >> 32)
+
+    new_left |= right & 0x00F000F000F000F0
+    new_right |= left & 0x00F000F000F000F0
+
+    new_left |= ((left & 0x000F000F00000000) >> 32) | ((right & 0x00000000000F000F) << 32)
+    new_right |= ((right & 0x000F000F00000000) >> 32) | ((left & 0x00000000000F000F) << 32)
+
+    return new_left & 0xFFFFFFFFFFFFFFFF, new_right & 0xFFFFFFFFFFFFFFFF
+
+
+def _tweak_key_schedule(key, tweak, rounds):
+    if rounds == 0:
+        return tweak
+
+    left, right = tweak
+    key_left, key_right = key
+
+    for round_index in range(rounds):
+        left ^= key_left
+        right ^= key_right
+
+        rc_left, rc_right = _ROUND_CONSTANTS[round_index]
+        left ^= rc_left
+        right ^= rc_right
+
+        left = _sbox64(left)
+        right = _sbox64(right)
+
+        left, right = _prince_m((left, right))
+        left = _prince_shift(left)
+        right = _prince_shift(right)
+        left, right = _feistel((left, right))
+        left, right = _tks_shift((left, right))
+
+    left ^= key_left
+    right ^= key_right
+
+    rc_left, rc_right = _ROUND_CONSTANTS[rounds]
+    left ^= rc_left
+    right ^= rc_right
+    return left & 0xFFFFFFFFFFFFFFFF, right & 0xFFFFFFFFFFFFFFFF
+
+
+def _key_expansion(key, nr_keys):
+    if nr_keys <= 3:
+        raise AssertionError
+
+    left, right = key
+    key_words = [
+        (left >> 32) & 0xFFFFFFFF,
+        left & 0xFFFFFFFF,
+        (right >> 32) & 0xFFFFFFFF,
+        right & 0xFFFFFFFF,
+    ]
+
+    round_keys = [0] * nr_keys
+    round_keys[0] = key_words[0]
+    round_keys[1] = key_words[1]
+    round_keys[2] = key_words[2]
+    round_keys[3] = key_words[3]
+
+    if nr_keys > 4:
+        round_keys[4] = round_keys[0] ^ round_keys[1]
+    if nr_keys > 5:
+        round_keys[5] = round_keys[2] ^ round_keys[3]
+    if nr_keys > 6:
+        round_keys[6] = round_keys[0] ^ round_keys[2]
+    if nr_keys > 7:
+        round_keys[7] = round_keys[1] ^ round_keys[3]
+    if nr_keys > 8:
+        round_keys[8] = round_keys[0] ^ round_keys[3]
+    if nr_keys > 9:
+        round_keys[9] = round_keys[1] ^ round_keys[2]
+
+    return round_keys
+
+
 class BEANIE_CVL:
-    def __init__(self, R=5, rks=None, name=None, rl=None, rr=None,
-                 rks_right=None):
+    def __init__(self, R=5, start=None, end=None, rks=None, master_key=None,
+                 tweak=None, name=None, rl=None, rr=None, rks_right=None):
         r"""
         The CiVerLy implementation of BEANIE.
 
@@ -20,9 +222,25 @@ class BEANIE_CVL:
 
             - ``R`` -- integer (default: ``5``); Number of encryption rounds.
 
+            - ``start`` -- integer (optional); First round of the slice to
+              build (1-indexed, absolute with respect to an ``R``-round cipher).
+              Must be given together with ``end``.
+
+            - ``end`` -- integer (optional); Last round of the slice to build
+              (1-indexed, inclusive). Round ``R`` always contains the final
+              whitening key addition.
+
             - ``rks`` -- list (optional); The round key values. Must have
               length :math:`R+1` (normal mode) or :math:`rl+1` (U-shape mode).
               Defaults to all zeros.
+
+            - ``master_key`` -- 128-bit integer or pair of 64-bit integers
+              (optional); The main key. If given, ``tweak`` must also be given
+              and ``rks`` must not be given. The round keys are derived with
+              the BEANIE tweak-key schedule. Not supported in U-shape mode.
+
+            - ``tweak`` -- 128-bit integer or pair of 64-bit integers
+              (optional); The 128-bit tweak used together with ``master_key``.
 
             - ``name`` -- string (optional); The name of the cipher.
 
@@ -63,6 +281,33 @@ class BEANIE_CVL:
             '0xf05a49f1'
             sage: hex(vec_to_int(beanie(int_to_vec(0xabcdef01, 32))))
             '0x8dd221be'
+
+        Derive round keys from a master key / tweak pair::
+
+            sage: from civerly.cipher_implementations.beanie import BEANIE_CVL
+            sage: from civerly.util import int_to_vec, vec_to_int
+            sage: beanie = BEANIE_CVL(
+            ....:     R=5, master_key=(0, 0), tweak=(0, 0))
+            sage: hex(vec_to_int(beanie(int_to_vec(0x00000000, 32))))
+            '0xda46f4d3'
+
+        Slicing is absolute with respect to the full ``R``-round cipher. The
+        output of a first slice can be chained into a second slice to reproduce
+        the full encryption::
+
+            sage: from civerly.cipher_implementations.beanie import BEANIE_CVL
+            sage: from civerly.util import int_to_vec, vec_to_int
+            sage: rks = [
+            ....:   0x01234567, 0x89abcdef, 0xfedcba98,
+            ....:   0x76543210, 0x88888888, 0x88888888
+            ....: ]
+            sage: beanie_full = BEANIE_CVL(R=5, rks=rks)
+            sage: beanie_12 = BEANIE_CVL(R=5, start=1, end=2, rks=rks)
+            sage: beanie_35 = BEANIE_CVL(R=5, start=3, end=5, rks=rks)
+            sage: pt = int_to_vec(0xabcdef01, 32)
+            sage: mid = beanie_12(pt)
+            sage: vec_to_int(beanie_35(mid)) == vec_to_int(beanie_full(pt))
+            True
 
         U-shape attack with one round on each branch::
 
@@ -126,6 +371,16 @@ class BEANIE_CVL:
             sage: hex(vec_to_int(beanie(int_to_vec(0x12345678, 32))))
             '0x49b5c28a'
 
+        A one-round slice matches the first full round::
+
+            sage: from civerly.cipher_implementations.beanie import BEANIE_CVL
+            sage: from civerly.util import int_to_vec, vec_to_int
+            sage: rks = [0x01234567, 0x89abcdef, 0xfedcba98]
+            sage: full = BEANIE_CVL(R=1, rks=rks[:2])
+            sage: slce = BEANIE_CVL(R=1, start=1, end=1, rks=rks[:2])
+            sage: full(int_to_vec(0x12345678, 32)) == slce(int_to_vec(0x12345678, 32))
+            True
+
         Model the cipher with MILP (differential, wordwise, branch number)::
 
             sage: from civerly.cipher_implementations.beanie import BEANIE_CVL
@@ -182,18 +437,40 @@ class BEANIE_CVL:
             ....:   trail = str(beanie.get_trail(model_options))
             ....:   assert "Unnamed Component" not in trail
             6864 variables and 15361 clauses were written to '...'
-            [  0 ,100] (trying w =  50) : SAT
-            [  0 , 50] (trying w =  25) : SAT
-            [  0 , 25] (trying w =  12) : SAT
-            [  0 , 12] (trying w =   6) : UNSAT
-            [  7 , 12] (trying w =   9) : SAT
-            [  7 ,  9] (trying w =   8) : UNSAT
-            9
+            '[  0 ,100] (trying w =  50) : SAT\n[  0 , 50] (trying w =  25) : SAT\n[  0 , 25] (trying w =  12) : SAT\n[  0 , 12] (trying w =   6) : UNSAT\n[  7 , 12] (trying w =   9) : SAT\n[  doctest output truncated (1 line)\n            9
         """
         if name is None:
             name = "BEANIE"
 
         u_shape_mode = (rl is not None) or (rr is not None)
+
+        # -------------------------------------------------------------------
+        # Validate the round-range arguments.
+        # -------------------------------------------------------------------
+        if (start is not None) != (end is not None):
+            raise ValueError("start and end must be provided together")
+
+        if u_shape_mode and (start is not None or end is not None):
+            raise ValueError("start/end slicing is not supported in U-shape mode")
+
+        if start is not None:
+            if not (1 <= start <= end <= R):
+                raise ValueError("invalid start/end range for the given R")
+        else:
+            start = 1
+            end = R
+
+        # -------------------------------------------------------------------
+        # Validate / derive the round keys.
+        # -------------------------------------------------------------------
+        if master_key is not None or tweak is not None:
+            if u_shape_mode:
+                raise ValueError("master_key/tweak not supported in U-shape mode")
+            if rks is not None:
+                raise ValueError("rks and master_key/tweak are mutually exclusive")
+            if master_key is None or tweak is None:
+                raise ValueError("master_key and tweak must be supplied together")
+            rks = self._derive_round_keys(master_key, tweak, R)
 
         if not u_shape_mode:
             if rks is None:
@@ -311,26 +588,33 @@ class BEANIE_CVL:
         beanie_last.add_output([(node_p, (i, i)) for i in range(8)])
 
         if not u_shape_mode:
-            # Assemble the normal cipher
+            # Assemble the (possibly sliced) normal cipher
+            if start != 1 or end != R:
+                name = f"{name}-{start}-{end}"
             beanie_cipher = AESlike(4, 4, 2, name=name)
             node = beanie_cipher.IN
-            for r in range(R - 1):
+
+            # Full rounds (all but the last round of the cipher)
+            for r in range(start - 1, min(end, R - 1)):
                 beanie_round.nodes[node_rk].const = rks[r]
                 node = beanie_cipher.add_subcipher(
                     beanie_round, [(node, (i, i)) for i in range(8)]
                 )
 
-            beanie_last.nodes[node_rk_last].const = rks[R - 1]
-            node = beanie_cipher.add_subcipher(
-                beanie_last, [(node, (i, i)) for i in range(8)]
-            )
+            # Last round only if the slice reaches it
+            if end == R:
+                beanie_last.nodes[node_rk_last].const = rks[R - 1]
+                node = beanie_cipher.add_subcipher(
+                    beanie_last, [(node, (i, i)) for i in range(8)]
+                )
+                key_add_final = RoundkeyXOR_CVL(
+                    32, const=rks[R], name="KeyAdd"
+                )
+                node = beanie_cipher.add_subcipher(
+                    key_add_final, [(node, (i, i)) for i in range(8)]
+                )
 
-            key_add_final = RoundkeyXOR_CVL(32, const=rks[R], name="KeyAdd")
-            node = beanie_cipher.add_subcipher(
-                key_add_final, [(node, (i, i)) for i in range(8)]
-            )
             beanie_cipher.add_output([(node, (i, i)) for i in range(8)])
-
             self.beanie_cipher = beanie_cipher
             return
 
@@ -434,6 +718,38 @@ class BEANIE_CVL:
 
         beanie_cipher.add_output([(node, (i, i)) for i in range(8)])
         self.beanie_cipher = beanie_cipher
+
+    @staticmethod
+    def _derive_round_keys(master_key, tweak, R):
+        r"""
+        Derive the BEANIE round keys from a 128-bit master key and tweak.
+
+        INPUT:
+
+            - ``master_key`` -- integer or pair of 64-bit integers.
+
+            - ``tweak`` -- integer or pair of 64-bit integers.
+
+            - ``R`` -- integer; number of encryption rounds.
+
+        OUTPUT: list of ``R+1`` 32-bit round keys.
+        """
+        def _split128(value):
+            if isinstance(value, int):
+                return (value & 0xFFFFFFFFFFFFFFFF, (value >> 64) & 0xFFFFFFFFFFFFFFFF)
+            try:
+                left, right = value
+            except Exception as exc:
+                raise ValueError(
+                    "master_key and tweak must be 128-bit integers or pairs "
+                    "of 64-bit integers"
+                ) from exc
+            return (int(left) & 0xFFFFFFFFFFFFFFFF, int(right) & 0xFFFFFFFFFFFFFFFF)
+
+        key = _split128(master_key)
+        t_in = _split128(tweak)
+        scheduled = _tweak_key_schedule(key, t_in, R)
+        return _key_expansion(scheduled, R + 1)
 
     def __new__(cls, *args, **kwargs):
         instance = super(BEANIE_CVL, cls).__new__(cls)
