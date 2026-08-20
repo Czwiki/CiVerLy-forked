@@ -21,149 +21,149 @@ _MASK16 = (1 << 16) - 1
 _MASK32 = (1 << 32) - 1
 
 
-class ARADI_CVL:
-    @staticmethod
-    def _rol32(value, shift):
-        """Rotate a 32-bit word left by ``shift`` bits."""
-        shift %= 32
-        value &= _MASK32
-        return ((value << shift) | (value >> (32 - shift))) & _MASK32
+def _rol32(value, shift):
+    """Rotate a 32-bit word left by ``shift`` bits."""
+    shift %= 32
+    value &= _MASK32
+    return ((value << shift) | (value >> (32 - shift))) & _MASK32
 
-    @staticmethod
-    def _rol16(value, shift):
-        """Rotate a 16-bit half-word left by ``shift`` bits."""
-        shift %= 16
-        value &= _MASK16
-        return ((value << shift) | (value >> (16 - shift))) & _MASK16
 
-    @staticmethod
-    def _aradi_sbox_table():
-        """Build the 4-bit ARADI S-box truth table."""
-        table = []
-        for nibble in range(16):
-            w = (nibble >> 3) & 1
-            x = (nibble >> 2) & 1
-            y = (nibble >> 1) & 1
-            z = nibble & 1
+def _rol16(value, shift):
+    """Rotate a 16-bit half-word left by ``shift`` bits."""
+    shift %= 16
+    value &= _MASK16
+    return ((value << shift) | (value >> (16 - shift))) & _MASK16
 
-            x = x ^ (w & y)
-            z = z ^ (x & y)
-            y = y ^ (w & z)
-            w = w ^ (x & z)
 
-            table.append((w << 3) | (x << 2) | (y << 1) | z)
-        return table
+def _aradi_sbox_table():
+    """Build the 4-bit ARADI S-box truth table."""
+    table = []
+    for nibble in range(16):
+        w = (nibble >> 3) & 1
+        x = (nibble >> 2) & 1
+        y = (nibble >> 1) & 1
+        z = nibble & 1
 
-    @classmethod
-    def _aradi_linear_word_eval(cls, word, a, b, c):
-        """Evaluate ARADI's linear layer on one 32-bit word."""
-        upper = (word >> 16) & _MASK16
-        lower = word & _MASK16
+        x = x ^ (w & y)
+        z = z ^ (x & y)
+        y = y ^ (w & z)
+        w = w ^ (x & z)
 
-        first = upper ^ cls._rol16(upper, a) ^ cls._rol16(lower, c)
-        second = lower ^ cls._rol16(lower, a) ^ cls._rol16(upper, b)
+        table.append((w << 3) | (x << 2) | (y << 1) | z)
+    return table
 
-        return ((first & _MASK16) << 16) | (second & _MASK16)
 
-    @classmethod
-    def _aradi_linear_word_matrix(cls, a, b, c):
-        """Return the binary matrix representation for one word transform."""
-        rows = []
-        for basis_index in range(32):
-            basis = 1 << (31 - basis_index)
-            rows.append(int_to_vec(cls._aradi_linear_word_eval(basis, a, b, c), 32))
-        return matrix(GF(2), rows).transpose()
+def _aradi_linear_word_eval(word, a, b, c):
+    """Evaluate ARADI's linear layer on one 32-bit word."""
+    upper = (word >> 16) & _MASK16
+    lower = word & _MASK16
 
-    @classmethod
-    def _aradi_key_schedule(cls, master_key):
-        r"""
-        Expand a 256-bit ARADI master key into 17 128-bit round keys.
+    first = upper ^ _rol16(upper, a) ^ _rol16(lower, c)
+    second = lower ^ _rol16(lower, a) ^ _rol16(upper, b)
 
-        The schedule follows the ARADI specification using the linear maps
-        ``M0``/``M1`` on 32-bit word pairs and the alternating permutations
-        ``P0`` and ``P1``.
+    return ((first & _MASK16) << 16) | (second & _MASK16)
 
-        INPUT:
 
-            - ``master_key`` -- list or tuple of 8 integers; The master key
-              words, each fitting in 32 bits.
+def _aradi_linear_word_matrix(a, b, c):
+    """Return the binary matrix representation for one word transform."""
+    rows = []
+    for basis_index in range(32):
+        basis = 1 << (31 - basis_index)
+        rows.append(int_to_vec(_aradi_linear_word_eval(basis, a, b, c), 32))
+    return matrix(GF(2), rows).transpose()
 
-        OUTPUT: A list of 17 integers, each encoding one 128-bit round key
-        as ``w || x || y || z`` in big-endian layout.
-        """
-        if len(master_key) != 8:
+
+def _m0(x, y):
+    s = _rol32(x, 1)
+    return (s ^ y, _rol32(y, 3) ^ s ^ y)
+
+
+def _m1(x, y):
+    s = _rol32(x, 9)
+    return (s ^ y, _rol32(y, 28) ^ s ^ y)
+
+
+def _permute(state, j):
+    state = list(state)
+    if j % 2 == 0:
+        state[1], state[2] = state[2], state[1]
+        state[5], state[6] = state[6], state[5]
+    else:
+        state[1], state[4] = state[4], state[1]
+        state[3], state[6] = state[6], state[3]
+    return state
+
+
+def _keyschedule_step(input_state, i):
+    # Mix the four word pairs with M0/M1.
+    t0, t1 = _m0(input_state[0], input_state[1])
+    t2, t3 = _m1(input_state[2], input_state[3])
+    t4, t5 = _m0(input_state[4], input_state[5])
+    t6, t7 = _m1(input_state[6], input_state[7])
+    mixed = [t0, t1, t2, t3, t4, t5, t6, t7]
+
+    # Apply P_i and XOR the round counter into the last word.
+    perm = _permute(mixed, i)
+    perm[7] = (perm[7] ^ i) & _MASK32
+    return perm
+
+
+def _aradi_key_schedule(master_key):
+    r"""
+    Expand a 256-bit ARADI master key into 17 128-bit round keys.
+
+    INPUT:
+
+        - ``master_key`` -- list or tuple of 8 integers; The master key
+          words, each fitting in 32 bits.
+
+    OUTPUT: A list of 17 integers, each encoding one 128-bit round key
+    as ``w || x || y || z`` in big-endian layout.
+    """
+    if len(master_key) != 8:
+        raise ValueError(
+            f"ARADI master key must contain 8 words, got {len(master_key)}"
+        )
+
+    # Validate range and convert to a mutable list of 32-bit words.
+    key_state = []
+    for i, word in enumerate(master_key):
+        if not (0 <= word <= _MASK32):
             raise ValueError(
-                f"ARADI master key must contain 8 words, got {len(master_key)}"
+                f"Master key word {i} is out of 32-bit range: {word}"
             )
+        key_state.append(int(word) & _MASK32)
 
-        # Validate range and convert to a mutable list of 32-bit words.
-        key_state = []
-        for i, word in enumerate(master_key):
-            if not (0 <= word <= _MASK32):
-                raise ValueError(
-                    f"Master key word {i} is out of 32-bit range: {word}"
-                )
-            key_state.append(int(word) & _MASK32)
+    # Generate the successive 8-word register states.
+    states = [key_state]
+    for i in range(1, 16, 2):
+        ki = _keyschedule_step(states[-1], i - 1)
+        ki2 = _keyschedule_step(ki, i)
+        states.append(ki)
+        states.append(ki2)
 
-        def m0(x, y):
-            s = cls._rol32(x, 1)
-            return (s ^ y, cls._rol32(y, 3) ^ s ^ y)
+    # Extract round keys.  Even-indexed rounds use the first four words,
+    # odd-indexed rounds the last four; the post-whitening key is the
+    # first four words of the final register state.
+    round_key_word_lists = [states[0][:4]]
+    for i in range(1, 16, 2):
+        round_key_word_lists.append(states[i][4:])
+        round_key_word_lists.append(states[i + 1][:4])
 
-        def m1(x, y):
-            s = cls._rol32(x, 9)
-            return (s ^ y, cls._rol32(y, 28) ^ s ^ y)
+    round_keys = []
+    for words in round_key_word_lists:
+        rk = (
+            (words[0] & _MASK32) << 96
+            | (words[1] & _MASK32) << 64
+            | (words[2] & _MASK32) << 32
+            | (words[3] & _MASK32)
+        )
+        round_keys.append(rk)
 
-        def permute(state, j):
-            state = list(state)
-            if j % 2 == 0:
-                state[1], state[2] = state[2], state[1]
-                state[5], state[6] = state[6], state[5]
-            else:
-                state[1], state[4] = state[4], state[1]
-                state[3], state[6] = state[6], state[3]
-            return state
+    return round_keys
 
-        def keyschedule_step(input_state, i):
-            # Mix the four word pairs with M0/M1.
-            t0, t1 = m0(input_state[0], input_state[1])
-            t2, t3 = m1(input_state[2], input_state[3])
-            t4, t5 = m0(input_state[4], input_state[5])
-            t6, t7 = m1(input_state[6], input_state[7])
-            mixed = [t0, t1, t2, t3, t4, t5, t6, t7]
 
-            # Apply P_i and XOR the round counter into the last word.
-            perm = permute(mixed, i)
-            perm[7] = (perm[7] ^ i) & _MASK32
-            return perm
-
-        # Generate the successive 8-word register states.
-        states = [key_state]
-        for i in range(1, 16, 2):
-            ki = keyschedule_step(states[-1], i - 1)
-            ki2 = keyschedule_step(ki, i)
-            states.append(ki)
-            states.append(ki2)
-
-        # Extract round keys.  Even-indexed rounds use the first four words,
-        # odd-indexed rounds the last four; the post-whitening key is the
-        # first four words of the final register state.
-        round_key_word_lists = [states[0][:4]]
-        for i in range(1, 16, 2):
-            round_key_word_lists.append(states[i][4:])
-            round_key_word_lists.append(states[i + 1][:4])
-
-        round_keys = []
-        for words in round_key_word_lists:
-            rk = (
-                (words[0] & _MASK32) << 96
-                | (words[1] & _MASK32) << 64
-                | (words[2] & _MASK32) << 32
-                | (words[3] & _MASK32)
-            )
-            round_keys.append(rk)
-
-        return round_keys
-
+class ARADI_CVL:
     def __init__(
         self,
         R=None,
@@ -406,7 +406,7 @@ class ARADI_CVL:
                 raise ValueError(
                     "When `key` is provided, `R` must not exceed 16."
                 )
-            full_rks = self._aradi_key_schedule(key)
+            full_rks = _aradi_key_schedule(key)
             needed = expected_rks_count
             if round_start + needed > len(full_rks):
                 raise ValueError(
@@ -423,7 +423,7 @@ class ARADI_CVL:
 
         cipher = SBoxCipher(128, 128, name=name)
 
-        sbox = SBox_CVL(SBox(self._aradi_sbox_table()), name="SBox")
+        sbox = SBox_CVL(SBox(_aradi_sbox_table()), name="SBox")
         sbox_layer = SBoxCipher(128, 128, name="SBoxLayer")
         for bit_index in range(32):
             node = sbox_layer.add_subcipher(
@@ -441,7 +441,7 @@ class ARADI_CVL:
             c_values = [14, 11, 14, 7]
 
             linear_layer = SBoxCipher(128, 128, name=f"LinearLayer{round_index}")
-            word_matrix = self._aradi_linear_word_matrix(
+            word_matrix = _aradi_linear_word_matrix(
                 a_values[round_index],
                 b_values[round_index],
                 c_values[round_index],
