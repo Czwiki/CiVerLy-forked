@@ -209,6 +209,39 @@ def _key_expansion(key, nr_keys):
     return round_keys
 
 
+def _split128(value):
+    if isinstance(value, int):
+        return (value & 0xFFFFFFFFFFFFFFFF, (value >> 64) & 0xFFFFFFFFFFFFFFFF)
+    try:
+        left, right = value
+    except Exception as exc:
+        raise ValueError(
+            "master_key and tweak must be 128-bit integers or pairs "
+            "of 64-bit integers"
+        ) from exc
+    return (int(left) & 0xFFFFFFFFFFFFFFFF, int(right) & 0xFFFFFFFFFFFFFFFF)
+
+
+def _derive_round_keys(master_key, tweak, R):
+    r"""
+    Derive the BEANIE round keys from a 128-bit master key and tweak.
+
+    INPUT:
+
+        - ``master_key`` -- integer or pair of 64-bit integers.
+
+        - ``tweak`` -- integer or pair of 64-bit integers.
+
+        - ``R`` -- integer; number of encryption rounds.
+
+    OUTPUT: list of ``R+1`` 32-bit round keys.
+    """
+    key = _split128(master_key)
+    t_in = _split128(tweak)
+    scheduled = _tweak_key_schedule(key, t_in, R)
+    return _key_expansion(scheduled, R + 1)
+
+
 class BEANIE_CVL:
     def __init__(self, R=5, start=None, end=None, rks=None, master_key=None,
                  tweak=None, name=None, rl=None, rr=None, rks_right=None):
@@ -470,7 +503,7 @@ class BEANIE_CVL:
                 raise ValueError("rks and master_key/tweak are mutually exclusive")
             if master_key is None or tweak is None:
                 raise ValueError("master_key and tweak must be supplied together")
-            rks = self._derive_round_keys(master_key, tweak, R)
+            rks = _derive_round_keys(master_key, tweak, R)
 
         if not u_shape_mode:
             if rks is None:
@@ -718,38 +751,6 @@ class BEANIE_CVL:
 
         beanie_cipher.add_output([(node, (i, i)) for i in range(8)])
         self.beanie_cipher = beanie_cipher
-
-    @staticmethod
-    def _derive_round_keys(master_key, tweak, R):
-        r"""
-        Derive the BEANIE round keys from a 128-bit master key and tweak.
-
-        INPUT:
-
-            - ``master_key`` -- integer or pair of 64-bit integers.
-
-            - ``tweak`` -- integer or pair of 64-bit integers.
-
-            - ``R`` -- integer; number of encryption rounds.
-
-        OUTPUT: list of ``R+1`` 32-bit round keys.
-        """
-        def _split128(value):
-            if isinstance(value, int):
-                return (value & 0xFFFFFFFFFFFFFFFF, (value >> 64) & 0xFFFFFFFFFFFFFFFF)
-            try:
-                left, right = value
-            except Exception as exc:
-                raise ValueError(
-                    "master_key and tweak must be 128-bit integers or pairs "
-                    "of 64-bit integers"
-                ) from exc
-            return (int(left) & 0xFFFFFFFFFFFFFFFF, int(right) & 0xFFFFFFFFFFFFFFFF)
-
-        key = _split128(master_key)
-        t_in = _split128(tweak)
-        scheduled = _tweak_key_schedule(key, t_in, R)
-        return _key_expansion(scheduled, R + 1)
 
     def __new__(cls, *args, **kwargs):
         instance = super(BEANIE_CVL, cls).__new__(cls)
