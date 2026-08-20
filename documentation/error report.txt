@@ -1,0 +1,28 @@
+Traceback (most recent call last):
+  File "/Users/Uni/Documents/GitHub/CiVerLy-documentations-and-tests/Qalqan analysis/Qalqan.sage.py", line 13, in <module>
+    qalqan.analyse(model_options)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/nix/store/3wcdf8a86iwmwpikmr16wqpdyjkihr03-python3-3.13.11-env/lib/python3.13/site-packages/civerly/cipher.py", line 1545, in analyse
+    self.model(model_options)
+    ~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/nix/store/3wcdf8a86iwmwpikmr16wqpdyjkihr03-python3-3.13.11-env/lib/python3.13/site-packages/civerly/cipher.py", line 1182, in model
+    return self._model_sat(model_options, _first_iter=True)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/3wcdf8a86iwmwpikmr16wqpdyjkihr03-python3-3.13.11-env/lib/python3.13/site-packages/civerly/cipher.py", line 1276, in _model_sat
+    comp._copy_over_dictionaries_recursively(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        prev, model_options
+        ^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/nix/store/3wcdf8a86iwmwpikmr16wqpdyjkihr03-python3-3.13.11-env/lib/python3.13/site-packages/civerly/cipher.py", line 2346, in _copy_over_dictionaries_recursively
+    self.nodes[i]._copy_over_dictionaries_recursively(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        prev.nodes[i], model_options
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/nix/store/3wcdf8a86iwmwpikmr16wqpdyjkihr03-python3-3.13.11-env/lib/python3.13/site-packages/civerly/cipher.py", line 2342, in _copy_over_dictionaries_recursively
+    self.dictionaries_sat = deepcopy(prev.dictionaries_sat)
+                                     ^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'RoundkeyXOR_CVL' object has no attribute 'dictionaries_sat'
