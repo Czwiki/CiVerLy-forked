@@ -124,12 +124,13 @@ Suggested practice:
 
 ## 7) Key schedule strategy
 
-Decide whether the key schedule is modeled explicitly. If you only need fixed-round testing or do not analyze related-key behavior, use constants in `RoundkeyXOR_CVL` and pass `rks` to the constructor. If the key schedule matters to your analysis, model it as a dedicated subcipher instead of hard-coding the constants in the round function.
+Decide whether the key schedule is modeled explicitly. If you only need fixed-round testing or do not analyze related-key behavior, use constants in `RoundkeyXOR_CVL` and pass `rks` to the constructor. 
 
 Key schedule encapsulation:
 
-- Implement the key schedule as a class method. This method should only be usable from the constructor or from other internal helper functions; it is not part of the public cipher API.
+- Implement the key schedule as a external method. This method should only be usable from the constructor or from other internal helper functions; it is not part of the public cipher API.
 - The constructor should accept a master key (`master_key`), from which the round keys are derived using the internal key-schedule method.
+- The full key schedule must be implemented and used by default when a master key is provided. Explicit round keys (`rks`) must also be accepted as an alternative to allow fixed-key testing or external key specification.
 - Providing a master key and providing explicit round keys (`rks`) are mutually exclusive. The constructor must raise an error when both are supplied.
 
 Practical rule: if the examples in `skinny.py` or `abc.py` set round constants on a node before each round, follow that pattern; if the round key is fixed and externally known, a constant XOR is usually enough.
