@@ -124,7 +124,7 @@ Suggested practice:
 
 ## 7) Key schedule strategy
 
-Decide whether the key schedule is modeled explicitly. If you only need fixed-round testing or do not analyze related-key behavior, use constants in `RoundkeyXOR_CVL` and pass `rks` to the constructor. 
+If you only need fixed-round testing or do not analyze related-key behavior, use constants in `RoundkeyXOR_CVL` and pass `rks` to the constructor. 
 
 Key schedule encapsulation:
 
