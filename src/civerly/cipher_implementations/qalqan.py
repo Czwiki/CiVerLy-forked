@@ -890,16 +890,72 @@ class QALQAN_CVL:
         use_byteadd_for_whitening = variant == "byteadd_byteadd"
         use_byteadd_for_middle = variant != "original"
 
-        byte_rk_indices = [
-            i for i, n in enumerate(add8_byte_cipher.nodes)
-            if n.name.startswith("rk_byte_")
-        ]
+        # ---- reusable first-round template (XOR or byte-add, S, L) ---
+        first_round = Cipher(128, 128, name="QalqanFirstRound")
+        if use_byteadd_for_whitening:
+            n_key_byte = first_round.add_subcipher(
+                add8_byte_cipher,
+                [(first_round.IN, (i, i)) for i in range(128)],
+            )
+            first_key_rk_nodes = _byte_rk_indices(first_round, n_key_byte)
+        else:
+            n_key_xor = first_round.add_subcipher(
+                RoundkeyXOR_CVL(128, 0, name="KeyAdd_whiten"),
+                [(first_round.IN, (i, i)) for i in range(128)],
+            )
+        n_s = first_round.add_subcipher(
+            sbox_cipher,
+            [((n_key_byte if use_byteadd_for_whitening else n_key_xor), (i, i))
+             for i in range(128)]
+        )
+        n_l = first_round.add_subcipher(
+            l_cipher, [(n_s, (i, i)) for i in range(128)]
+        )
+        first_round.add_output([(n_l, (i, i)) for i in range(128)])
 
-        def _set_byte_rks(rk_int):
-            for j, idx in enumerate(byte_rk_indices):
-                add8_byte_cipher.nodes[idx].const = (
-                    (rk_int >> (8 * (15 - j))) & 0xFF
-                )
+        # ---- reusable middle-round template (ADD, S, L) ---------------
+        middle_round = Cipher(128, 128, name="QalqanRound")
+        if use_byteadd_for_middle:
+            n_add = middle_round.add_subcipher(
+                add8_byte_cipher,
+                [(middle_round.IN, (i, i)) for i in range(128)],
+            )
+            middle_key_rk_nodes = _byte_rk_indices(middle_round, n_add)
+        else:
+            n_add = middle_round.add_subcipher(
+                add128_cipher,
+                [(middle_round.IN, (i, i)) for i in range(128)]
+            )
+        n_s = middle_round.add_subcipher(
+            sbox_cipher, [(n_add, (i, i)) for i in range(128)]
+        )
+        n_l = middle_round.add_subcipher(
+            l_cipher, [(n_s, (i, i)) for i in range(128)]
+        )
+        middle_round.add_output([(n_l, (i, i)) for i in range(128)])
+
+        # ---- reusable final-whitening template (XOR or byte-add) ------
+        final_round = Cipher(128, 128, name="QalqanFinalRound")
+        if use_byteadd_for_whitening:
+            n_key_byte = final_round.add_subcipher(
+                add8_byte_cipher,
+                [(final_round.IN, (i, i)) for i in range(128)],
+            )
+            final_key_rk_nodes = _byte_rk_indices(final_round, n_key_byte)
+        else:
+            n_key_xor = final_round.add_subcipher(
+                RoundkeyXOR_CVL(128, 0, name="KeyAdd_whiten"),
+                [(final_round.IN, (i, i)) for i in range(128)],
+            )
+        final_round.add_output(
+            [((n_key_byte if use_byteadd_for_whitening else n_key_xor), (i, i))
+             for i in range(128)]
+        )
+
+        def _set_byte_rks(cipher_parent, add_node, rk_indices, rk_int):
+            inner = cipher_parent.nodes[add_node]
+            for j, idx in enumerate(rk_indices):
+                inner.nodes[idx].const = (rk_int >> (8 * (15 - j))) & 0xFF
 
         # ---- assemble the full cipher ---------------------------------
         cipher = Cipher(128, 128, name=name)
@@ -910,22 +966,11 @@ class QALQAN_CVL:
         # Round 0 / first requested round
         if current == 0:
             if use_byteadd_for_whitening:
-                _set_byte_rks(rks[0])
-                node = cipher.add_subcipher(
-                    add8_byte_cipher, [(node, (i, i)) for i in range(128)]
-                )
+                _set_byte_rks(first_round, n_key_byte, first_key_rk_nodes, rks[0])
             else:
-                kw = RoundkeyXOR_CVL(
-                    128, rks[0], name="KeyAdd_start"
-                )
-                node = cipher.add_subcipher(
-                    kw, [(node, (i, i)) for i in range(128)]
-                )
+                first_round.nodes[n_key_xor].const = rks[0]
             node = cipher.add_subcipher(
-                sbox_cipher, [(node, (i, i)) for i in range(128)]
-            )
-            node = cipher.add_subcipher(
-                l_cipher, [(node, (i, i)) for i in range(128)]
+                first_round, [(node, (i, i)) for i in range(128)]
             )
             current = 1
 
@@ -934,34 +979,20 @@ class QALQAN_CVL:
             if r == end and r == full_rounds:
                 # Final whitening (no S, no L)
                 if use_byteadd_for_whitening:
-                    _set_byte_rks(rks[r])
-                    node = cipher.add_subcipher(
-                        add8_byte_cipher, [(node, (i, i)) for i in range(128)]
-                    )
+                    _set_byte_rks(final_round, n_key_byte, final_key_rk_nodes, rks[r])
                 else:
-                    kw = RoundkeyXOR_CVL(
-                        128, rks[r], name="KeyAdd_fin"
-                    )
-                    node = cipher.add_subcipher(
-                        kw, [(node, (i, i)) for i in range(128)]
-                    )
+                    final_round.nodes[n_key_xor].const = rks[r]
+                node = cipher.add_subcipher(
+                    final_round, [(node, (i, i)) for i in range(128)]
+                )
             else:
                 # ADD → S → L middle round
                 if use_byteadd_for_middle:
-                    _set_byte_rks(rks[r])
-                    node = cipher.add_subcipher(
-                        add8_byte_cipher, [(node, (i, i)) for i in range(128)]
-                    )
+                    _set_byte_rks(middle_round, n_add, middle_key_rk_nodes, rks[r])
                 else:
-                    add128_cipher.nodes[rk_node].const = _byte_rev_int(rks[r])
-                    node = cipher.add_subcipher(
-                        add128_cipher, [(node, (i, i)) for i in range(128)]
-                    )
+                    middle_round.nodes[n_add].nodes[rk_node].const = _byte_rev_int(rks[r])
                 node = cipher.add_subcipher(
-                    sbox_cipher, [(node, (i, i)) for i in range(128)]
-                )
-                node = cipher.add_subcipher(
-                    l_cipher, [(node, (i, i)) for i in range(128)]
+                    middle_round, [(node, (i, i)) for i in range(128)]
                 )
 
         cipher.add_output([(node, (i, i)) for i in range(128)])
